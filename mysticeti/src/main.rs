@@ -1,17 +1,20 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use core::num;
 use std::{
     fs,
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
     sync::Arc,
+    clone::Clone,
 };
 
 use clap::{command, Parser};
-use eyre::{eyre, Context, Result};
+use color_eyre::owo_colors::OwoColorize;
+use eyre::{eyre, Context, ContextCompat, Result};
 use mysticeti_core::{
-    committee::Committee,
+    committee::{Authority, Committee},
     config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig},
     types::AuthorityIndex,
     validator::Validator,
@@ -57,6 +60,9 @@ enum Operation {
         /// Path to the file holding the client parameters (for benchmarks).
         #[clap(long, value_name = "FILE")]
         client_parameters_path: String,
+        /// Number of validator instances to run.
+        #[clap(long, value_name = "INT")]
+        num_instances: usize,
     },
     /// Deploy a local validator for test. Dryrun mode uses default keys and committee configurations.
     DryRun {
@@ -66,12 +72,18 @@ enum Operation {
         /// The number of authorities in the committee.
         #[clap(long, value_name = "INT")]
         committee_size: usize,
+        /// Number of validator instances to run.
+        #[clap(long, value_name = "INT")]
+        num_instances: usize,
     },
     /// Deploy a local testbed.
     Testbed {
         /// The number of authorities in the committee.
         #[clap(long, value_name = "INT")]
         committee_size: usize,
+        /// Number of validator instances to run.
+        #[clap(long, value_name = "INT")]
+        num_instances: usize,
     },
 }
 
@@ -97,6 +109,7 @@ async fn main() -> Result<()> {
             public_config_path,
             private_config_path,
             client_parameters_path,
+            num_instances,
         } => {
             run(
                 authority,
@@ -104,14 +117,19 @@ async fn main() -> Result<()> {
                 public_config_path,
                 private_config_path,
                 client_parameters_path,
+                num_instances,
             )
             .await?
         }
-        Operation::Testbed { committee_size } => testbed(committee_size).await?,
+        Operation::Testbed {
+            committee_size,
+            num_instances,
+        } => testbed(committee_size, num_instances).await?,
         Operation::DryRun {
             authority,
             committee_size,
-        } => dryrun(authority, committee_size).await?,
+            num_instances,
+        } => dryrun(authority, committee_size, num_instances).await?,
     }
 
     Ok(())
@@ -223,23 +241,21 @@ fn benchmark_genesis(
 //     Ok(())
 // }
 
-/// Boot a single validator node.
+/// Boot a multiple validator nodes.
 async fn run(
     authority: AuthorityIndex,
     committee_path: String,
     public_config_path: String,
     private_config_path: String,
     client_parameters_path: String,
+    num_instances: usize,
 ) -> Result<()> {
-    tracing::info!("Starting validator {authority}");
+    tracing::info!("Starting {num_instances} validator(s) with authority {authority}");
 
     let committee = Committee::load(&committee_path)
         .wrap_err(format!("Failed to load committee file '{committee_path}'"))?;
     let public_config = NodePublicConfig::load(&public_config_path).wrap_err(format!(
         "Failed to load parameters file '{public_config_path}'"
-    ))?;
-    let private_config = NodePrivateConfig::load(&private_config_path).wrap_err(format!(
-        "Failed to load private configuration file '{private_config_path}'"
     ))?;
     let client_parameters = ClientParameters::load(&client_parameters_path).wrap_err(format!(
         "Failed to load client parameters file '{client_parameters_path}'"
@@ -247,35 +263,64 @@ async fn run(
 
     let committee = Arc::new(committee);
 
-    let network_address = public_config
-        .network_address(authority)
-        .ok_or(eyre!("No network address for authority {authority}"))
-        .wrap_err("Unknown authority")?;
-    let mut binding_network_address = network_address;
-    binding_network_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let mut handles: Vec<tokio::task::JoinHandle<Result<(), eyre::Report>>> = Vec::new();
 
-    let metrics_address = public_config
-        .metrics_address(authority)
-        .ok_or(eyre!("No metrics address for authority {authority}"))
-        .wrap_err("Unknown authority")?;
-    let mut binding_metrics_address = metrics_address;
-    binding_metrics_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    for i in 0..num_instances {
+        let authority_instance = authority + i as AuthorityIndex;
+        let committee_instance = Arc::clone(&committee);
+        // clone configs to give each instance a separate copy of the configuration
+        let public_config_instance = public_config.clone();
 
-    // Boot the validator node.
-    let validator = Validator::start(
-        authority,
-        committee,
-        &public_config,
-        private_config,
-        client_parameters,
-    )
-    .await?;
-    let (network_result, _metrics_result) = validator.await_completion().await;
-    network_result.expect("Validator crashed");
+        // derive the private_config_path for each validator instance
+        let unique_private_config_path = format!("{}_{}", private_config_path, i);
+        let private_config_instance = NodePrivateConfig::load(&unique_private_config_path).wrap_err(format!(
+            "Failed to load private configuration file '{unique_private_config_path}' for instance {i}"
+        ))?;
+        let client_parameters_instance = client_parameters.clone();
+
+        let handle = tokio::spawn(async move {
+            let newtork_address = public_config_instance
+                .network_address(authority_instance)  
+                .ok_or(eyre!("No network address for authority {authority}"))
+                .wrap_err("Unknown authority")?;
+            let mut binding_network_address = newtork_address;
+            binding_network_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+
+            let metrics_address = public_config_instance
+                .metrics_address(authority_instance)
+                .ok_or(eyre!("No metrics address for authority {authority}"))
+                .wrap_err("Unknown authority")?;
+            let mut binding_metrics_address = metrics_address;
+            binding_metrics_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+
+            // Boot the validator node
+            let validator = Validator::start(
+                authority_instance, 
+                committee_instance, 
+                &public_config_instance, 
+                private_config_instance,
+                client_parameters_instance
+            )
+            .await?;
+        let (network_result, _metrics_result) = validator.await_completion().await;
+        network_result.expect("Validator crashed");
+        Ok(())
+        });
+        handles.push(handle);
+    }
+    
+    // Await all spawned tasks
+    let results = futures::future::join_all(handles).await;
+
+    for result in results {
+        result??;
+    }
+
     Ok(())
+
 }
 
-async fn testbed(committee_size: usize) -> Result<()> {
+async fn testbed(committee_size: usize, num_instances: usize) -> Result<()> {
     tracing::info!("Starting testbed with committee size {committee_size}");
 
     todo!();
@@ -319,16 +364,17 @@ async fn testbed(committee_size: usize) -> Result<()> {
     // Ok(())
 }
 
-async fn dryrun(authority: AuthorityIndex, committee_size: usize) -> Result<()> {
+async fn dryrun(authority: AuthorityIndex, committee_size: usize, num_instances: usize) -> Result<()> {
     tracing::warn!(
-        "Starting validator {authority} in dryrun mode (committee size: {committee_size})"
+        "Starting validator {authority} with {num_instances} validators in dryrun mode (committee size: {committee_size})"
     );
 
-    todo!()
+    todo!();
 
     // let committee = Committee::new_for_benchmarks(committee_size);
+    // let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     // let public_config = NodePublicConfig::new_for_tests(committee_size);
-    // let client_parameters = ClientParameters::default();
+    // let parameters = Parameters::new_for_benchmarks(ips);
 
     // let dir = PathBuf::from(format!("dryrun-validator-{authority}"));
     // match fs::remove_dir_all(&dir) {
@@ -338,24 +384,31 @@ async fn dryrun(authority: AuthorityIndex, committee_size: usize) -> Result<()> 
     //         return Err(e).wrap_err(format!("Failed to remove directory '{}'", dir.display()))
     //     }
     // }
+
     // match fs::create_dir_all(&dir) {
     //     Ok(_) => {}
     //     Err(e) => {
     //         return Err(e).wrap_err(format!("Failed to create directory '{}'", dir.display()))
     //     }
     // }
-    // let private_config = NodePrivateConfig::new_for_benchmarks(&dir, authority);
+    
+    // let mut handles = Vec::new();
 
-    // Validator::start(
-    //     authority,
-    //     committee.clone(),
-    //     &public_config,
-    //     private_config,
-    //     client_parameters,
-    // )
-    // .await?
-    // .await_completion()
-    // .await
-    // .0
-    // .expect("Validator failed");
+    // let mut handles = Vec::new();
+
+    // for instance in 0..num_instances {
+    //     let authority_index = authority * instance;
+    //     let private_config = NodePrivateConfig::new_for_benchmarks(&dir, authority_index);
+    //     let validator = Validator::start(
+    //         authority_index,
+    //         committee.clone(),
+    //         &public_config,
+    //         private_config,
+    //         client_parameters.clone(),
+    //     ).await?;
+    //     handles.push(validator.await_completion());
+
+    // }
+    // futures::future::join_all(handles).await;
+    // Ok(())
 }
