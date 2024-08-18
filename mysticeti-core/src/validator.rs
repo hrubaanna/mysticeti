@@ -26,6 +26,8 @@ use crate::{
     wal::{self, walf},
 };
 
+use tokio::sync::mpsc;
+
 pub struct Validator {
     network_synchronizer: NetworkSyncer<RealBlockHandler, TestCommitHandler<TransactionLog>>,
     metrics_handle: JoinHandle<Result<(), hyper::Error>>,
@@ -92,6 +94,10 @@ impl Validator {
             metrics.clone(),
             committed_transaction_log,
         );
+
+        // Create the mpsc channel
+        let (commit_sender, commit_receiver) = mpsc::channel(1024);
+
         let core = Core::open(
             block_handler,
             authority,
@@ -101,6 +107,7 @@ impl Validator {
             recovered,
             wal_writer,
             CoreOptions::default(),
+            commit_sender,
         );
         let network = Network::load(
             public_config,

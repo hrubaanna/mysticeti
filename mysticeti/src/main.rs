@@ -241,7 +241,7 @@ fn benchmark_genesis(
 //     Ok(())
 // }
 
-/// Boot a multiple validator nodes.
+/// Boot multiple validator nodes.
 async fn run(
     authority: AuthorityIndex,
     committee_path: String,
