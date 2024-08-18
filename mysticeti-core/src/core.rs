@@ -37,7 +37,7 @@ use crate::{
 
 use tokio::sync::mpsc;
 
-pub enum CoreMessage {
+pub enum CommitMessage {
     DagRoundCommit(RoundNumber),
 }
 
@@ -60,7 +60,7 @@ pub struct Core<H: BlockHandler> {
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
-    commit_sender: mpsc::Sender<CoreMessage>,
+    commit_sender: mpsc::Sender<CommitMessage>,
 }
 
 pub struct CoreOptions {
@@ -84,7 +84,7 @@ impl<H: BlockHandler> Core<H> {
         recovered: RecoveredState,
         mut wal_writer: WalWriter,
         options: CoreOptions,
-        commit_sender: mpsc::Sender<CoreMessage>,
+        commit_sender: mpsc::Sender<CommitMessage>,
     ) -> Self {
         let RecoveredState {
             block_store,
@@ -358,7 +358,7 @@ impl<H: BlockHandler> Core<H> {
         if let Some(last) = sequence.last() {
             self.last_commit_leader = *last.reference();
             // Send a message to all other validator instances that a DAG round has been committed
-            let _ = self.commit_sender.try_send(CoreMessage::DagRoundCommit(last.round()));
+            let _ = self.commit_sender.try_send(CommitMessage::DagRoundCommit(last.round()));
         }
 
         // todo: should ideally come from execution result of epoch smart contract
