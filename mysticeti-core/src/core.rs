@@ -7,9 +7,7 @@ use std::{
 use minibytes::Bytes;
 
 use crate::{
-    block_handler::BlockHandler,
-    block_manager::BlockManager,
-    block_store::{
+    block_handler::BlockHandler, block_manager::BlockManager, block_store::{
         BlockStore,
         BlockWriter,
         CommitData,
@@ -17,22 +15,10 @@ use crate::{
         WAL_ENTRY_COMMIT,
         WAL_ENTRY_PAYLOAD,
         WAL_ENTRY_STATE,
-    },
-    committee::Committee,
-    config::NodePublicConfig,
-    consensus::{
+    }, committee::Committee, config::NodePublicConfig, consensus::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
-    },
-    crypto::{dummy_signer, Signer},
-    data::Data,
-    epoch_close::EpochManager,
-    metrics::{Metrics, UtilizationTimerVecExt},
-    runtime::timestamp_utc,
-    state::RecoveredState,
-    threshold_clock::ThresholdClockAggregator,
-    types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock},
-    wal::{WalPosition, WalSyncer, WalWriter},
+    }, crypto::{dummy_signer, Signer}, data::Data, epoch_close::EpochManager, metrics::{Metrics, UtilizationTimerVecExt}, network::NetworkMessage, runtime::timestamp_utc, state::RecoveredState, threshold_clock::ThresholdClockAggregator, types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock}, wal::{WalPosition, WalSyncer, WalWriter}
 };
 
 use tokio::sync::mpsc;
@@ -60,7 +46,8 @@ pub struct Core<H: BlockHandler> {
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
-    commit_sender: mpsc::Sender<CommitMessage>,
+    validator_notifier: mpsc::Sender<CommitMessage>,
+    linearizer_sender: mpsc::Sender<BlockReference>,
 }
 
 pub struct CoreOptions {
@@ -84,7 +71,8 @@ impl<H: BlockHandler> Core<H> {
         recovered: RecoveredState,
         mut wal_writer: WalWriter,
         options: CoreOptions,
-        commit_sender: mpsc::Sender<CommitMessage>,
+        validator_notifier: mpsc::Sender<CommitMessage>,
+        linearizer_sender: mpsc::Sender<BlockReference>,
     ) -> Self {
         let RecoveredState {
             block_store,
@@ -160,7 +148,8 @@ impl<H: BlockHandler> Core<H> {
             epoch_manager,
             rounds_in_epoch: config.parameters.rounds_in_epoch,
             committer,
-            commit_sender,
+            validator_notifier,
+            linearizer_sender,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -347,7 +336,7 @@ impl<H: BlockHandler> Core<H> {
         self.metrics.proposed_block_vote_count.observe(votes);
     }
 
-    pub fn try_commit(&mut self) -> Vec<Data<StatementBlock>> {
+    pub async fn try_commit(&mut self) -> Vec<Data<StatementBlock>> {
         let sequence: Vec<_> = self
             .committer
             .try_commit(self.last_commit_leader)
@@ -357,8 +346,12 @@ impl<H: BlockHandler> Core<H> {
 
         if let Some(last) = sequence.last() {
             self.last_commit_leader = *last.reference();
-            // Send a message to all other validator instances that a DAG round has been committed
-            let _ = self.commit_sender.try_send(CommitMessage::DagRoundCommit(last.round()));
+            
+            // Send block to LinearizerTask
+            self.linearizer_sender.send(*last.reference()).await.unwrap();
+
+            // Notify all validators about the committed round
+            self.validator_notifier.send(NetworkMessage::RoundCommitted(last.reference().round())).await.unwrap();
         }
 
         // todo: should ideally come from execution result of epoch smart contract
