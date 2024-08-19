@@ -1,14 +1,19 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::fmt;
 
-use crate::block_store::BlockStore;
+use crate::block_store::{self, BlockStore};
+use crate::core::CommitMessage;
+use crate::validator::Validator;
 use crate::{
     data::Data,
     types::{BlockReference, StatementBlock},
 };
+
+use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
@@ -36,11 +41,17 @@ impl CommittedSubDag {
 pub struct Linearizer {
     /// Keep track of all committed blocks to avoid committing the same block twice.
     pub committed: HashSet<BlockReference>,
+    commit_messages: Mutex<HashMap<u64, HashMap<ValidatorId, Data<StatementBlock>>>>,
+    num_validators: usize,
 }
 
 impl Linearizer {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(num_validators: usize) -> Self {
+        Self {
+            committed: HashSet::new(),
+            commit_messages: Mutex::new(HashMap::new()),
+            num_validators,
+        }
     }
 
     /// Collect the sub-dag from a specific anchor excluding any duplicates or blocks that
@@ -73,21 +84,66 @@ impl Linearizer {
         CommittedSubDag::new(leader_block_ref, to_commit)
     }
 
+    // Handle commit messages by grouping them by round number and sorting them once all validators have sent their messages for the round.
     pub fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Data<StatementBlock>>,
+        round: u64,
+        validator_id: ValidatorId,
+        block: Data<StatementBlock>,
     ) -> Vec<CommittedSubDag> {
-        let mut committed = vec![];
-        for leader_block in committed_leaders {
-            // Collect the sub-dag generated using each of these leaders as anchor.
-            let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
+        let mut commit_messages = self.commit_messages.lock().unwrap();
 
-            // [Optional] sort the sub-dag using a deterministic algorithm.
-            sub_dag.sort();
-            committed.push(sub_dag);
+        // Group commit messages by round number
+        let round_messages = commit_messages.entry(round);
+        round_messages.insert(validator_id, block);
+
+        // Check if we have received commit messages from all validators for this round
+        if round_messages.len() == self.num_validators {
+            // Collect and sort the commit messages for this round
+            let mut committed_leaders: Vec<Data<StatementBlock>> = round_messages.values().cloned().collect();
+            committed_leaders.sort_by_key(|x| x.round()); // Sort the blocks by round number
+
+            // Process each sorted commit message
+            for leader_block in committed_leaders {
+                // Collect the sub-dag generated using each of these leaders as anchor.
+                let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
+
+                // Sort the sub-dag using a deterministic algorithm.
+                sub_dag.sort();
+                committed.push(sub_dag);            
         }
+
+        // Remove the processed round from the commit messages
+        commit_messages.remove(&round);
+
+        }
+
         committed
+    }
+}
+
+pub struct LinearizerTask {
+    linearizer: Linearizer,
+    receiver: mpsc::Receiver<BlockReference>,
+}
+
+impl LinearizerTask {
+    pub fn new(receiver: mpsc::Receiver<BlockReference>, linearizer: Linearizer) -> Self {
+        Self { receiver, linearizer }
+    }
+
+    pub async fn run(mut self) {
+        while let Some(block_reference) = self.receiver.recv().await {
+            // Process the block reference
+            // Assuming each validator manages its own BlockStore
+            if let Some(block) = BlockStore::get_block(block_reference) {
+                let (validator_id, round) = block_reference.author_round();
+
+                // Handle the commit
+                self.linearizer.handle_commit(&self.block_store, round, validator_id, block);
+            }
+        }
     }
 }
 
