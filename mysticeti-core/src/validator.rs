@@ -96,7 +96,7 @@ impl Validator {
         );
 
         // Create the mpsc channel
-        let (commit_sender, commit_receiver) = mpsc::channel(1024);
+        let (commit_sender, _commit_receiver) = mpsc::channel(1024);
 
         let core = Core::open(
             block_handler,
