@@ -40,6 +40,7 @@ impl Validator {
         public_config: &NodePublicConfig,
         private_config: NodePrivateConfig,
         client_parameters: ClientParameters,
+        linearizer_sender: mpsc::Sender<Block>,
     ) -> Result<Self> {
         let network_address = public_config
             .network_address(authority)
@@ -108,6 +109,7 @@ impl Validator {
             wal_writer,
             CoreOptions::default(),
             commit_sender,
+            linearizer_sender,
         );
         let network = Network::load(
             public_config,
