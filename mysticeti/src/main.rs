@@ -1,25 +1,19 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use core::num;
 use std::{
-    fs,
-    net::{IpAddr, Ipv4Addr},
-    path::PathBuf,
-    sync::Arc,
-    clone::Clone,
+    clone::Clone, fs, net::{IpAddr, Ipv4Addr}, path::PathBuf, sync::{mpsc, Arc}
 };
 
 use clap::{command, Parser};
 use color_eyre::owo_colors::OwoColorize;
 use eyre::{eyre, Context, ContextCompat, Result};
 use mysticeti_core::{
-    committee::{Authority, Committee},
-    config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig},
-    types::AuthorityIndex,
-    validator::Validator,
+    committee::{Authority, Committee}, config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig}, consensus::linearizer::{self, LinearizerTask}, types::AuthorityIndex, validator::Validator
 };
 use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
+
+use mysticeti_core::core::Core;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -252,64 +246,141 @@ async fn run(
 ) -> Result<()> {
     tracing::info!("Starting {num_instances} validator(s) with authority {authority}");
 
-    let committee = Committee::load(&committee_path)
-        .wrap_err(format!("Failed to load committee file '{committee_path}'"))?;
-    let public_config = NodePublicConfig::load(&public_config_path).wrap_err(format!(
-        "Failed to load parameters file '{public_config_path}'"
-    ))?;
-    let client_parameters = ClientParameters::load(&client_parameters_path).wrap_err(format!(
-        "Failed to load client parameters file '{client_parameters_path}'"
-    ))?;
+    let (committee, public_config, client_parameters) = load_configurations(
+        &committee_path,
+        &public_config_path,
+        &client_parameters_path,
+    )?;
 
     let committee = Arc::new(committee);
 
-    let mut handles: Vec<tokio::task::JoinHandle<Result<(), eyre::Report>>> = Vec::new();
+    let handles = spawn_validator_instances(
+        authority,
+        num_instances,
+        committee,
+        public_config,
+        private_config_path,
+        client_parameters,
+    ).await?;
+
+    await_validator_completion(handles).await?;
+
+    Ok(())
+}
+
+fn load_configurations(
+    committee_path: &str,
+    public_config_path: &str,
+    client_parameters_path: &str,
+) -> Result<(Committee, NodePublicConfig, ClientParameters)> {
+    let committee = Committee::load(committee_path)
+        .wrap_err(format!("Failed to load committee file '{committee_path}'"))?;
+    let public_config = NodePublicConfig::load(public_config_path).wrap_err(format!(
+        "Failed to load parameters file '{public_config_path}'"
+    ))?;
+    let client_parameters = ClientParameters::load(client_parameters_path).wrap_err(format!(
+        "Failed to load client parameters file '{client_parameters_path}'"
+    ))?;
+
+    Ok((committee, public_config, client_parameters))
+}
+
+async fn spawn_validator_instances(
+    authority: AuthorityIndex,
+    num_instances: usize,
+    committee: Arc<Committee>,
+    public_config: NodePublicConfig,
+    private_config_path: String,
+    client_parameters: ClientParameters,
+) -> Result<Vec<tokio::task::JoinHandle<Result<(), eyre::Report>>>> {
+    let mut handles = Vec::new();
 
     for i in 0..num_instances {
         let authority_instance = authority + i as AuthorityIndex;
         let committee_instance = Arc::clone(&committee);
-        // clone configs to give each instance a separate copy of the configuration
         let public_config_instance = public_config.clone();
-
-        // derive the private_config_path for each validator instance
         let unique_private_config_path = format!("{}_{}", private_config_path, i);
-        let private_config_instance = NodePrivateConfig::load(&unique_private_config_path).wrap_err(format!(
-            "Failed to load private configuration file '{unique_private_config_path}' for instance {i}"
-        ))?;
+        let private_config_instance = load_private_config(&unique_private_config_path, i)?;
         let client_parameters_instance = client_parameters.clone();
 
-        let handle = tokio::spawn(async move {
-            let newtork_address = public_config_instance
-                .network_address(authority_instance)  
-                .ok_or(eyre!("No network address for authority {authority}"))
-                .wrap_err("Unknown authority")?;
-            let mut binding_network_address = newtork_address;
-            binding_network_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let (linearizer_task_sender, linearizer_task_receiver) = tokio::sync::mpsc::channel(1024);
+        spawn_linearizer_task(linearizer_task_receiver);
 
-            let metrics_address = public_config_instance
-                .metrics_address(authority_instance)
-                .ok_or(eyre!("No metrics address for authority {authority}"))
-                .wrap_err("Unknown authority")?;
-            let mut binding_metrics_address = metrics_address;
-            binding_metrics_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let handle = spawn_validator(
+            authority_instance,
+            committee_instance,
+            public_config_instance,
+            private_config_instance,
+            client_parameters_instance,
+            linearizer_task_sender,
+        );
+        handles.push(handle);
+    }
 
-            // Boot the validator node
-            let validator = Validator::start(
-                authority_instance, 
-                committee_instance, 
-                &public_config_instance, 
-                private_config_instance,
-                client_parameters_instance
-            )
-            .await?;
+    Ok(handles)
+}
+
+fn load_private_config(unique_private_config_path: &str, instance: usize) -> Result<NodePrivateConfig> {
+    NodePrivateConfig::load(unique_private_config_path).wrap_err(format!(
+        "Failed to load private configuration file '{unique_private_config_path}' for instance {instance}"
+    ))
+}
+
+fn spawn_linearizer_task(linearizer_task_receiver: tokio::sync::mpsc::Receiver<Block>) {
+    let linearizer_task = LinearizerTask::new(linearizer_task_receiver);
+    tokio::spawn(linearizer_task.run());
+}
+
+fn spawn_validator(
+    authority_instance: AuthorityIndex,
+    committee_instance: Arc<Committee>,
+    public_config_instance: NodePublicConfig,
+    private_config_instance: NodePrivateConfig,
+    client_parameters_instance: ClientParameters,
+    linearizer_task_sender: tokio::sync::mpsc::Sender<Block>,
+) -> tokio::task::JoinHandle<Result<(), eyre::Report>> {
+    tokio::spawn(async move {
+        let network_address = get_network_address(&public_config_instance, authority_instance)?;
+        let metrics_address = get_metrics_address(&public_config_instance, authority_instance)?;
+
+        let validator = Validator::start(
+            authority_instance, 
+            committee_instance, 
+            &public_config_instance, 
+            private_config_instance,
+            client_parameters_instance,
+            linearizer_task_sender,
+        )
+        .await?;
         let (network_result, _metrics_result) = validator.await_completion().await;
         network_result.expect("Validator crashed");
         Ok(())
-        });
-        handles.push(handle);
-    }
-    
-    // Await all spawned tasks
+    })
+}
+
+fn get_network_address(public_config: &NodePublicConfig, authority: AuthorityIndex) -> Result<SocketAddr> {
+    let network_address = public_config
+        .network_address(authority)  
+        .ok_or(eyre!("No network address for authority {authority}"))
+        .wrap_err("Unknown authority")?;
+    let mut binding_network_address = network_address;
+    binding_network_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    Ok(binding_network_address)
+}
+
+fn get_metrics_address(public_config: &NodePublicConfig, authority: AuthorityIndex) -> Result<SocketAddr> {
+    let metrics_address = public_config
+        .metrics_address(authority)
+        .ok_or(eyre!("No metrics address for authority {authority}"))
+        .wrap_err("Unknown authority")?;
+    let mut binding_metrics_address = metrics_address;
+    binding_metrics_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    Ok(binding_metrics_address)
+}
+
+async fn await_validator_completion(
+    handles: Vec<tokio::task::JoinHandle<Result<(), eyre::Report>>>
+) -> Result<()> {
     let results = futures::future::join_all(handles).await;
 
     for result in results {
@@ -317,7 +388,6 @@ async fn run(
     }
 
     Ok(())
-
 }
 
 async fn testbed(committee_size: usize, num_instances: usize) -> Result<()> {
