@@ -34,6 +34,8 @@ pub trait CommitObserver: Send + Sync {
         committed_leaders: Vec<Data<StatementBlock>>,
     ) -> Vec<CommittedSubDag>;
 
+    fn new(global_linearizer: Arc<Mutex<GlobalLinearizer>>) -> Self;
+
     fn aggregator_state(&self) -> Bytes;
 
     fn recover_committed(&mut self, committed: HashSet<BlockReference>, state: Option<Bytes>);
@@ -44,6 +46,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         core: Core<H>,
         commit_period: u64,
         signals: S,
+        global_linearizer: Arc<Mutex<GlobalLinearizer>>,
         commit_observer: C,
         metrics: Arc<Metrics>,
     ) -> Self {
@@ -53,7 +56,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             force_new_block: false,
             commit_period,
             signals,
-            commit_observer,
+            commit_observer: C::new(global_linearizer),
             connected_authorities: HashSet::with_capacity(committee_size),
             metrics,
         }
