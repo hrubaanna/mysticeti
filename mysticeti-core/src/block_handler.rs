@@ -337,7 +337,7 @@ impl BlockHandler for TestBlockHandler {
 }
 
 pub struct TestCommitHandler<H = HashSet<TransactionLocator>> {
-    commit_interpreter: Linearizer,
+    global_linearizer: Arc<Mutex<Linearizer>>,
     transaction_votes: TransactionAggregator<QuorumThreshold, H>,
     committee: Arc<Committee>,
     committed_leaders: Vec<BlockReference>,
@@ -365,19 +365,19 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
         transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
         metrics: Arc<Metrics>,
         handler: H,
+        global_linearizer: Arc<Mutex<Linearizer>>,
     ) -> Self {
         let consensus_only = env::var("CONSENSUS_ONLY").is_ok();
         Self {
-            commit_interpreter: Linearizer::new(),
             transaction_votes: TransactionAggregator::with_handler(handler),
             committee,
             committed_leaders: vec![],
             // committed_dags: vec![],
             start_time: TimeInstant::now(),
             transaction_time,
-
             metrics,
             consensus_only,
+            global_linearizer,
         }
     }
 
@@ -435,9 +435,10 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
     ) -> Vec<CommittedSubDag> {
         let current_timestamp = runtime::timestamp_utc();
 
-        let committed = self
-            .commit_interpreter
-            .handle_commit(block_store, committed_leaders);
+        let committed = {
+            let mut linearizer = self.global_linearizer.lock().unwrap();
+            linearizer.handle_commit(block_store, committed_leaders);
+        };
         let transaction_time = self.transaction_time.lock();
         for commit in &committed {
             self.committed_leaders.push(commit.anchor);
@@ -476,12 +477,13 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
     }
 
     fn recover_committed(&mut self, committed: HashSet<BlockReference>, state: Option<Bytes>) {
-        assert!(self.commit_interpreter.committed.is_empty());
+        let mut linearizer = self.global_linearizer.lock();
+        assert!(linearizer.committed.is_empty());
         if let Some(state) = state {
             self.transaction_votes.with_state(&state);
         } else {
             assert!(committed.is_empty());
         }
-        self.commit_interpreter.committed = committed;
+        linearizer.committed = committed;
     }
 }
