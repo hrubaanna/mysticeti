@@ -96,6 +96,8 @@ impl Linearizer {
 
         // Group commit messages by round number
         let round_messages = commit_messages.entry(round);
+
+        // TODO: does this insert validator_id, block to all messages?
         round_messages.insert(validator_id, block);
 
         // Check if we have received commit messages from all validators for this round
@@ -124,24 +126,24 @@ impl Linearizer {
 }
 
 pub struct LinearizerTask {
-    linearizer: Linearizer,
+    global_linearizer: Arc<Mutex<Linearizer>>,
     receiver: mpsc::Receiver<BlockReference>,
 }
 
 impl LinearizerTask {
-    pub fn new(receiver: mpsc::Receiver<BlockReference>, linearizer: Linearizer) -> Self {
-        Self { receiver, linearizer }
+    pub fn new(receiver: mpsc::Receiver<BlockReference>, linearizer: Arc<Mutex<Linearizer>>) -> Self {
+        Self { receiver, global_linearizer }
     }
 
     pub async fn run(mut self) {
         while let Some(block_reference) = self.receiver.recv().await {
             // Process the block reference
-            // Assuming each validator manages its own BlockStore
+
             if let Some(block) = BlockStore::get_block(block_reference) {
                 let (validator_id, round) = block_reference.author_round();
 
                 // Handle the commit
-                self.linearizer.handle_commit(&self.block_store, round, validator_id, block);
+                self.global_linearizer.handle_commit(&self.block_store, round, validator_id, block);
             }
         }
     }
