@@ -9,7 +9,7 @@ use clap::{command, Parser};
 use color_eyre::owo_colors::OwoColorize;
 use eyre::{eyre, Context, ContextCompat, Result};
 use mysticeti_core::{
-    committee::{Authority, Committee}, config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig}, consensus::linearizer::{self, LinearizerTask}, types::AuthorityIndex, validator::Validator
+    committee::{Authority, Committee}, config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig}, consensus::linearizer::self, types::AuthorityIndex, validator::Validator
 };
 use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
 
@@ -309,7 +309,6 @@ async fn spawn_validator_instances(
         let client_parameters_instance = client_parameters.clone();
 
         let (linearizer_task_sender, linearizer_task_receiver) = tokio::sync::mpsc::channel(1024);
-        spawn_linearizer_task(linearizer_task_receiver, global_linearizer);
 
         let handle = spawn_validator(
             authority_instance,
@@ -332,21 +331,13 @@ fn load_private_config(unique_private_config_path: &str, instance: usize) -> Res
     ))
 }
 
-fn spawn_linearizer_task(
-    linearizer_task_receiver: tokio::sync::mpsc::Receiver<Block>,
-    global_linearizer: Arc<Mutex<Linearizer>>,
-) {
-    let linearizer_task = LinearizerTask::new(linearizer_task_receiver, global_linearizer);
-    tokio::spawn(linearizer_task.run());
-}
-
 fn spawn_validator(
     authority_instance: AuthorityIndex,
     committee_instance: Arc<Committee>,
     public_config_instance: NodePublicConfig,
     private_config_instance: NodePrivateConfig,
     client_parameters_instance: ClientParameters,
-    linearizer_task_sender: tokio::sync::mpsc::Sender<Block>,
+    linearizer_task_sender: tokio::sync::mpsc::Sender<BlockReference>,
     global_linearizer: Arc<Mutex<Linearizer>>,
 ) -> tokio::task::JoinHandle<Result<(), eyre::Report>> {
     tokio::spawn(async move {
