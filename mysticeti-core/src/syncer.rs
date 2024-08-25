@@ -12,6 +12,7 @@ use crate::{block_store::BlockStore, types::AuthorityIndex};
 use minibytes::Bytes;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
@@ -34,7 +35,7 @@ pub trait CommitObserver: Send + Sync {
         committed_leaders: Vec<Data<StatementBlock>>,
     ) -> Vec<CommittedSubDag>;
 
-    fn new(global_linearizer: Arc<Mutex<GlobalLinearizer>>) -> Self;
+    fn new(global_linearizer: Arc<Mutex<Linearizer>>) -> Self;
 
     fn aggregator_state(&self) -> Bytes;
 
@@ -46,7 +47,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         core: Core<H>,
         commit_period: u64,
         signals: S,
-        global_linearizer: Arc<Mutex<GlobalLinearizer>>,
+        global_linearizer: Arc<Mutex<Linearizer>>,
         commit_observer: C,
         metrics: Arc<Metrics>,
     ) -> Self {
