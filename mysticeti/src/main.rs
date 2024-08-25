@@ -264,6 +264,7 @@ async fn run(
         public_config,
         private_config_path,
         client_parameters,
+        global_linearizer,
     ).await?;
 
     await_validator_completion(handles).await?;
@@ -295,6 +296,7 @@ async fn spawn_validator_instances(
     public_config: NodePublicConfig,
     private_config_path: String,
     client_parameters: ClientParameters,
+    global_linearizer: Arc<Mutex<Linearizer>>,
 ) -> Result<Vec<tokio::task::JoinHandle<Result<(), eyre::Report>>>> {
     let mut handles = Vec::new();
 
@@ -307,7 +309,7 @@ async fn spawn_validator_instances(
         let client_parameters_instance = client_parameters.clone();
 
         let (linearizer_task_sender, linearizer_task_receiver) = tokio::sync::mpsc::channel(1024);
-        spawn_linearizer_task(linearizer_task_receiver);
+        spawn_linearizer_task(linearizer_task_receiver, global_linearizer);
 
         let handle = spawn_validator(
             authority_instance,
@@ -316,6 +318,7 @@ async fn spawn_validator_instances(
             private_config_instance,
             client_parameters_instance,
             linearizer_task_sender,
+            global_linearizer,
         );
         handles.push(handle);
     }
