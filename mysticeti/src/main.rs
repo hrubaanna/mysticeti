@@ -246,6 +246,9 @@ async fn run(
 ) -> Result<()> {
     tracing::info!("Starting {num_instances} validator(s) with authority {authority}");
 
+    // Create global linarizer
+    let global_linearizer = Arc::new(Mutex::new(Linearizer::new()));
+
     let (committee, public_config, client_parameters) = load_configurations(
         &committee_path,
         &public_config_path,
@@ -326,8 +329,11 @@ fn load_private_config(unique_private_config_path: &str, instance: usize) -> Res
     ))
 }
 
-fn spawn_linearizer_task(linearizer_task_receiver: tokio::sync::mpsc::Receiver<Block>) {
-    let linearizer_task = LinearizerTask::new(linearizer_task_receiver);
+fn spawn_linearizer_task(
+    linearizer_task_receiver: tokio::sync::mpsc::Receiver<Block>,
+    global_linearizer: Arc<Mutex<Linearizer>>,
+) {
+    let linearizer_task = LinearizerTask::new(linearizer_task_receiver, global_linearizer);
     tokio::spawn(linearizer_task.run());
 }
 
@@ -338,6 +344,7 @@ fn spawn_validator(
     private_config_instance: NodePrivateConfig,
     client_parameters_instance: ClientParameters,
     linearizer_task_sender: tokio::sync::mpsc::Sender<Block>,
+    global_linearizer: Arc<Mutex<Linearizer>>,
 ) -> tokio::task::JoinHandle<Result<(), eyre::Report>> {
     tokio::spawn(async move {
         let network_address = get_network_address(&public_config_instance, authority_instance)?;
@@ -350,6 +357,7 @@ fn spawn_validator(
             private_config_instance,
             client_parameters_instance,
             linearizer_task_sender,
+            global_linearizer,
         )
         .await?;
         let (network_result, _metrics_result) = validator.await_completion().await;
