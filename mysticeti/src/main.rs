@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    clone::Clone, fs, net::{IpAddr, Ipv4Addr}, path::PathBuf, sync::{mpsc, Arc}
+    clone::Clone, fs, net::{IpAddr, Ipv4Addr}, path::PathBuf, sync::Arc,
 };
+
+use tokio::sync::Mutex;
 
 use clap::{command, Parser};
 use color_eyre::owo_colors::OwoColorize;
 use eyre::{eyre, Context, ContextCompat, Result};
 use mysticeti_core::{
-    committee::{Authority, Committee}, config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig}, consensus::linearizer::self, types::AuthorityIndex, validator::Validator
+    committee::{Authority, Committee}, config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig}, consensus::linearizer::{self}, types::AuthorityIndex, validator::Validator
 };
 use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
 
@@ -308,15 +310,12 @@ async fn spawn_validator_instances(
         let private_config_instance = load_private_config(&unique_private_config_path, i)?;
         let client_parameters_instance = client_parameters.clone();
 
-        let (linearizer_task_sender, linearizer_task_receiver) = tokio::sync::mpsc::channel(1024);
-
         let handle = spawn_validator(
             authority_instance,
             committee_instance,
             public_config_instance,
             private_config_instance,
             client_parameters_instance,
-            linearizer_task_sender,
             global_linearizer,
         );
         handles.push(handle);
@@ -337,12 +336,13 @@ fn spawn_validator(
     public_config_instance: NodePublicConfig,
     private_config_instance: NodePrivateConfig,
     client_parameters_instance: ClientParameters,
-    linearizer_task_sender: tokio::sync::mpsc::Sender<BlockReference>,
     global_linearizer: Arc<Mutex<Linearizer>>,
 ) -> tokio::task::JoinHandle<Result<(), eyre::Report>> {
     tokio::spawn(async move {
         let network_address = get_network_address(&public_config_instance, authority_instance)?;
         let metrics_address = get_metrics_address(&public_config_instance, authority_instance)?;
+
+        let (linearizer_task_sender, linearizer_task_receiver) = tokio::sync::mpsc::channel(1024);
 
         let validator = Validator::start(
             authority_instance, 
@@ -351,9 +351,22 @@ fn spawn_validator(
             private_config_instance,
             client_parameters_instance,
             linearizer_task_sender,
-            global_linearizer,
+            Arc::clone(&global_linearizer),
         )
         .await?;
+
+        // Create the linearizer task
+        let linearizer_task = LinearizerTask::new(
+            linearizer_task_receiver,
+            global_linearizer,
+        );
+
+        let linearizer_task_handle = tokio::spawn(move || {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(linearizer_task.run());
+        });
+
         let (network_result, _metrics_result) = validator.await_completion().await;
         network_result.expect("Validator crashed");
         Ok(())
