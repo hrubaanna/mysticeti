@@ -6,6 +6,8 @@ use std::{
     sync::Arc,
 };
 
+use tokio::sync::Mutex;
+
 use ::prometheus::Registry;
 use eyre::{eyre, Context, Result};
 
@@ -22,11 +24,11 @@ use crate::{
     prometheus,
     runtime::{JoinError, JoinHandle},
     transactions_generator::TransactionGenerator,
-    types::AuthorityIndex,
+    types::{AuthorityIndex, BlockReference, StatementBlock},
     wal::{self, walf},
+    consensus::linearizer::Linearizer,
+    data::Data,
 };
-
-use tokio::sync::mpsc;
 
 pub struct Validator {
     network_synchronizer: NetworkSyncer<RealBlockHandler, TestCommitHandler<TransactionLog>>,
@@ -40,7 +42,8 @@ impl Validator {
         public_config: &NodePublicConfig,
         private_config: NodePrivateConfig,
         client_parameters: ClientParameters,
-        linearizer_sender: mpsc::Sender<Block>,
+        linearizer_sender: tokio::sync::mpsc::Sender<(BlockReference, Data<StatementBlock>)>,
+        global_linearizer: Arc<Mutex<Linearizer>>,
     ) -> Result<Self> {
         let network_address = public_config
             .network_address(authority)
@@ -94,10 +97,11 @@ impl Validator {
             block_handler.transaction_time.clone(),
             metrics.clone(),
             committed_transaction_log,
+            global_linearizer.clone(),
         );
 
-        // Create the mpsc channel
-        let (commit_sender, _commit_receiver) = mpsc::channel(1024);
+        // Create the channel for commits
+        let (commit_sender, _commit_receiver) = tokio::sync::mpsc::channel(1024);
 
         let core = Core::open(
             block_handler,
@@ -125,10 +129,12 @@ impl Validator {
             commit_handler,
             public_config.parameters.shutdown_grace_period,
             metrics,
+            global_linearizer,
         );
 
         tracing::info!("Validator {authority} listening on {network_address}");
         tracing::info!("Validator {authority} exposing metrics on {metrics_address}");
+        
 
         Ok(Self {
             network_synchronizer,
@@ -197,6 +203,7 @@ mod smoke_tests {
         let public_config = NodePublicConfig::new_for_tests(committee_size).with_port_offset(0);
         let client_parameters = ClientParameters::default();
 
+        let global_linearizer = Arc::new(Mutex::new(Linearizer::new()));
         let mut handles = Vec::new();
         let dir = TempDir::new("validator_commit").unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
@@ -213,6 +220,8 @@ mod smoke_tests {
                 &public_config,
                 private_config,
                 client_parameters.clone(),
+                linearizer_sender,
+                global_linearizer,
             )
             .await
             .unwrap();
@@ -245,6 +254,7 @@ mod smoke_tests {
         private_configs.iter().for_each(|private_config| {
             fs::create_dir_all(&private_config.storage_path).unwrap();
         });
+        let global_linearizer = Arc::new(Mutex::new(Linearizer::new()));
 
         // Boot all validators but one.
         for (i, private_config) in private_configs.into_iter().enumerate() {
@@ -258,6 +268,7 @@ mod smoke_tests {
                 &public_config,
                 private_config,
                 client_parameters.clone(),
+                global_linearizer,
             )
             .await
             .unwrap();
@@ -286,6 +297,7 @@ mod smoke_tests {
             &public_config,
             private_config,
             client_parameters,
+            global_linearizer,
         )
         .await
         .unwrap();
@@ -312,6 +324,7 @@ mod smoke_tests {
         let public_config = NodePublicConfig::new_for_tests(committee_size).with_port_offset(200);
         let client_parameters = ClientParameters::default();
 
+        let global_linearizer = Arc::new(Mutex::new(Linearizer::new()));
         let mut handles = Vec::new();
         let dir = TempDir::new("validator_crash_faults").unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
@@ -331,6 +344,7 @@ mod smoke_tests {
                 &public_config,
                 private_config,
                 client_parameters.clone(),
+                global_linearizer,
             )
             .await
             .unwrap();
