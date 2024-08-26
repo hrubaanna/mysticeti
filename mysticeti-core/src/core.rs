@@ -47,7 +47,7 @@ pub struct Core<H: BlockHandler> {
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
     validator_notifier: mpsc::Sender<CommitMessage>,
-    linearizer_sender: mpsc::Sender<BlockReference>,
+    linearizer_sender: mpsc::Sender<(BlockReference, Data<StatementBlock>)>,
 }
 
 pub struct CoreOptions {
@@ -72,7 +72,7 @@ impl<H: BlockHandler> Core<H> {
         mut wal_writer: WalWriter,
         options: CoreOptions,
         validator_notifier: mpsc::Sender<CommitMessage>,
-        linearizer_sender: mpsc::Sender<BlockReference>,
+        linearizer_sender: mpsc::Sender<(BlockReference, Data<StatementBlock>)>,
     ) -> Self {
         let RecoveredState {
             block_store,
@@ -347,11 +347,11 @@ impl<H: BlockHandler> Core<H> {
         if let Some(last) = sequence.last() {
             self.last_commit_leader = *last.reference();
             
-            // Send block to LinearizerTask
-            self.linearizer_sender.send(*last.reference()).await.unwrap();
+            // Send BlockReference and Data<StatementBlock>to LinearizerTask
+            self.linearizer_sender.send((*last.reference(), last.clone())).await.unwrap();
 
             // Notify all validators about the committed round
-            self.validator_notifier.send(NetworkMessage::RoundCommitted(last.reference().round())).await.unwrap();
+            self.validator_notifier.send(CommitMessage::DagRoundCommit(last.reference().round())).await;
         }
 
         // todo: should ideally come from execution result of epoch smart contract
