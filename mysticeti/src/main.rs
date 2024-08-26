@@ -2,20 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    clone::Clone, fs, net::{IpAddr, Ipv4Addr}, path::PathBuf, sync::Arc,
+    clone::Clone, fs, net::{IpAddr, Ipv4Addr, SocketAddr}, path::PathBuf, sync::Arc,
 };
 
 use tokio::sync::Mutex;
 
 use clap::{command, Parser};
-use color_eyre::owo_colors::OwoColorize;
-use eyre::{eyre, Context, ContextCompat, Result};
+use eyre::{eyre, Context, Result};
 use mysticeti_core::{
-    committee::{Authority, Committee}, config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig}, consensus::linearizer::{self}, types::AuthorityIndex, validator::Validator
+    committee::Committee, 
+    config::{ClientParameters, 
+        ImportExport, 
+        NodeParameters, 
+        NodePrivateConfig, 
+        NodePublicConfig
+    }, 
+    consensus::linearizer::{Linearizer, LinearizerTask},
+    types::AuthorityIndex, 
+    validator::Validator, 
 };
 use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
 
-use mysticeti_core::core::Core;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -249,7 +256,7 @@ async fn run(
     tracing::info!("Starting {num_instances} validator(s) with authority {authority}");
 
     // Create global linarizer
-    let global_linearizer = Arc::new(Mutex::new(Linearizer::new()));
+    let global_linearizer = Arc::new(Mutex::new(Linearizer::new(num_instances)));
 
     let (committee, public_config, client_parameters) = load_configurations(
         &committee_path,
@@ -309,6 +316,7 @@ async fn spawn_validator_instances(
         let unique_private_config_path = format!("{}_{}", private_config_path, i);
         let private_config_instance = load_private_config(&unique_private_config_path, i)?;
         let client_parameters_instance = client_parameters.clone();
+        let global_linearizer = Arc::clone(&global_linearizer);
 
         let handle = spawn_validator(
             authority_instance,
@@ -361,10 +369,8 @@ fn spawn_validator(
             global_linearizer,
         );
 
-        let linearizer_task_handle = tokio::spawn(move || {
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(linearizer_task.run());
+        let linearizer_task_handle = tokio::spawn(async move {
+            linearizer_task.run().await;
         });
 
         let (network_result, _metrics_result) = validator.await_completion().await;

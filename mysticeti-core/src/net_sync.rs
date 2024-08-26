@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use futures::{future::join_all};
+use futures::future::join_all;
 use tokio::{
     select,
     sync::{mpsc, oneshot, Notify, Mutex},
@@ -62,7 +62,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             core,
             commit_period,
             notify.clone(),
-            global_linearizer,
+            global_linearizer.clone(),
             commit_observer,
             metrics.clone(),
         );

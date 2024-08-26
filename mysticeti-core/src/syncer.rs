@@ -8,7 +8,7 @@ use crate::metrics::UtilizationTimerVecExt;
 use crate::runtime::timestamp_utc;
 use crate::types::{BlockReference, RoundNumber, StatementBlock};
 use crate::{block_handler::BlockHandler, metrics::Metrics};
-use crate::{block_store::BlockStore, types::AuthorityIndex};
+use crate::types::AuthorityIndex;
 use crate::consensus::linearizer::Linearizer;
 use minibytes::Bytes;
 use std::collections::HashSet;
