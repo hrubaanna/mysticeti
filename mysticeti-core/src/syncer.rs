@@ -31,7 +31,7 @@ pub trait SyncerSignals: Send + Sync {
 }
 
 pub trait CommitObserver: Send + Sync {
-    fn handle_commit(
+    fn observe_commit(
         &mut self,
         block_store: &BlockStore,
         committed_leaders: Vec<Data<StatementBlock>>,
@@ -120,7 +120,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             }
             let committed_subdag = self
                 .commit_observer
-                .handle_commit(self.core.block_store(), newly_committed);
+                .observe_commit(self.core.block_store(), newly_committed);
             self.core.handle_committed_subdag(
                 committed_subdag,
                 &self.commit_observer.aggregator_state(),
