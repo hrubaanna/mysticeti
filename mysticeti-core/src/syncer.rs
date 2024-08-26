@@ -9,10 +9,11 @@ use crate::runtime::timestamp_utc;
 use crate::types::{BlockReference, RoundNumber, StatementBlock};
 use crate::{block_handler::BlockHandler, metrics::Metrics};
 use crate::{block_store::BlockStore, types::AuthorityIndex};
+use crate::consensus::linearizer::Linearizer;
 use minibytes::Bytes;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
@@ -22,6 +23,7 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     commit_observer: C,
     pub(crate) connected_authorities: HashSet<AuthorityIndex>,
     metrics: Arc<Metrics>,
+    global_linearizer: Arc<Mutex<Linearizer>>
 }
 
 pub trait SyncerSignals: Send + Sync {
@@ -34,8 +36,6 @@ pub trait CommitObserver: Send + Sync {
         block_store: &BlockStore,
         committed_leaders: Vec<Data<StatementBlock>>,
     ) -> Vec<CommittedSubDag>;
-
-    fn new(global_linearizer: Arc<Mutex<Linearizer>>) -> Self;
 
     fn aggregator_state(&self) -> Bytes;
 
@@ -57,9 +57,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             force_new_block: false,
             commit_period,
             signals,
-            commit_observer: C::new(global_linearizer),
+            commit_observer,
             connected_authorities: HashSet::with_capacity(committee_size),
             metrics,
+            global_linearizer,
         }
     }
 
@@ -83,7 +84,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
-    fn try_new_block(&mut self) {
+    async fn try_new_block(&mut self) {
         let _timer = self
             .metrics
             .utilization_timer
@@ -103,7 +104,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                 return;
             }; // No need to commit after epoch is safe to close
 
-            let newly_committed = self.core.try_commit();
+            let newly_committed = self.core.try_commit().await;
             let utc_now = timestamp_utc();
             if !newly_committed.is_empty() {
                 let committed_refs: Vec<_> = newly_committed
