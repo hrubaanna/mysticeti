@@ -7,25 +7,14 @@ use std::{
     time::Duration,
 };
 
-use futures::future::join_all;
+use futures::{future::join_all};
 use tokio::{
     select,
-    sync::{mpsc, oneshot, Notify},
+    sync::{mpsc, oneshot, Notify, Mutex},
 };
 
 use crate::{
-    block_handler::BlockHandler,
-    block_store::BlockStore,
-    committee::Committee,
-    core::Core,
-    core_thread::CoreThreadDispatcher,
-    metrics::Metrics,
-    network::{Connection, Network, NetworkMessage},
-    runtime::{self, timestamp_utc, Handle, JoinError, JoinHandle},
-    syncer::{CommitObserver, Syncer, SyncerSignals},
-    synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
-    types::{format_authority_index, AuthorityIndex},
-    wal::WalSyncer,
+    block_handler::BlockHandler, block_store::BlockStore, committee::Committee, consensus::linearizer::Linearizer, core::Core, core_thread::CoreThreadDispatcher, metrics::Metrics, network::{Connection, Network, NetworkMessage}, runtime::{self, timestamp_utc, Handle, JoinError, JoinHandle}, syncer::{CommitObserver, Syncer, SyncerSignals}, synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters}, types::{format_authority_index, AuthorityIndex}, wal::WalSyncer
 };
 
 /// The maximum number of blocks that can be requested in a single message.
@@ -36,6 +25,7 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     main_task: JoinHandle<()>,
     syncer_task: oneshot::Receiver<()>,
     stop: mpsc::Receiver<()>,
+    global_linearizer: Arc<Mutex<Linearizer>>,
 }
 
 pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
@@ -56,6 +46,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         mut commit_observer: C,
         shutdown_grace_period: Duration,
         metrics: Arc<Metrics>,
+        global_linearizer: Arc<Mutex<Linearizer>>,
     ) -> Self {
         let authority_index = core.authority();
         let handle = Handle::current();
@@ -71,6 +62,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             core,
             commit_period,
             notify.clone(),
+            global_linearizer,
             commit_observer,
             metrics.clone(),
         );
@@ -108,6 +100,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             main_task,
             stop: stop_receiver,
             syncer_task,
+            global_linearizer,
         }
     }
 
