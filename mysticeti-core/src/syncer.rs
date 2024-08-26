@@ -33,8 +33,7 @@ pub trait SyncerSignals: Send + Sync {
 pub trait CommitObserver: Send + Sync {
     fn observe_commit(
         &mut self,
-        block_store: &BlockStore,
-        committed_leaders: Vec<Data<StatementBlock>>,
+        committed_subdags: Vec<CommittedSubDag>,
     ) -> Vec<CommittedSubDag>;
 
     fn aggregator_state(&self) -> Bytes;
@@ -117,14 +116,29 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                     })
                     .collect();
                 tracing::debug!("Committed {:?}", committed_refs);
+
+                let mut committed_subdags = Vec::new();
+                for block in newly_committed {
+                    let (validator_id, round) = block.reference().author_round();
+                    let subdag = self.global_linearizer.lock().await.handle_commit(
+                        round,
+                        validator_id,
+                        *block.reference(),
+                        block.clone(),
+                    ).await;
+                    committed_subdags.extend(subdag);
+                }
+
+                let observed_subdags = self.commit_observer.observe_commit(committed_subdags);
+
+                for subdag in observed_subdags {
+                    self.core.handle_committed_subdag(
+                        vec![subdag],
+                        &self.commit_observer.aggregator_state(),
+                    );
+                }
+
             }
-            let committed_subdag = self
-                .commit_observer
-                .observe_commit(self.core.block_store(), newly_committed);
-            self.core.handle_committed_subdag(
-                committed_subdag,
-                &self.commit_observer.aggregator_state(),
-            );
         }
     }
 
