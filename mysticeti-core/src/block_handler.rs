@@ -10,8 +10,7 @@ use std::{
 };
 
 use minibytes::Bytes;
-use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::{
     block_store::BlockStore,
@@ -178,7 +177,7 @@ impl BlockHandler for RealBlockHandler {
                     self.transaction_votes
                         .process_block(block, response_option, &self.committee);
                 for processed_locator in processed {
-                    let block_creation = transaction_time.get(&processed_locator);
+                    let block_creation = transaction_time.await.get(&processed_locator);
                     let transaction = self
                         .block_store
                         .get_transaction(&processed_locator)
@@ -354,8 +353,9 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Default> TestCommitHan
         committee: Arc<Committee>,
         transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
         metrics: Arc<Metrics>,
+        global_linearizer: Arc<Mutex<Linearizer>>,
     ) -> Self {
-        Self::new_with_handler(committee, transaction_time, metrics, Default::default())
+        Self::new_with_handler(committee, transaction_time, metrics, Default::default(), global_linearizer)
     }
 }
 
@@ -428,7 +428,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
 impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObserver
     for TestCommitHandler<H>
 {
-    fn handle_commit(
+    fn observe_commit(
         &mut self,
         block_store: &BlockStore,
         committed_leaders: Vec<Data<StatementBlock>>,
