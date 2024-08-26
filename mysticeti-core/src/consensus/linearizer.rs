@@ -35,35 +35,6 @@ impl CommittedSubDag {
     }
 }
 
-#[derive(Default)]
-pub struct CommittedList {
-    blocks: VecDeque<Data<StatementBlock>>,
-}
-
-impl CommittedList {
-    pub fn new() -> Self {
-        Self {
-            blocks: VecDeque::new(),
-        }
-    }
-
-    pub fn push(&mut self, block: Data<StatementBlock>) {
-        self.blocks.push_back(block);
-    }
-
-    pub fn extend(&mut self, other: CommittedList) {
-        self.blocks.extend(other.blocks);
-    }
-
-    // Sort the blocks by their hash values, used for sorting the blocks in a complete round
-    pub fn sort(&mut self) {
-        let mut vec: Vec<_> = self.blocks.drain(..).collect();
-        vec.sort_by(|a, b| a.reference().digest.cmp(&b.reference().digest));
-        self.blocks = vec.into();
-    }
-
-}
-
 /// Expand a committed sequence of leader into a sequence of sub-dags.
 #[derive(Default)]
 pub struct Linearizer {
@@ -71,7 +42,6 @@ pub struct Linearizer {
     pub committed: HashSet<BlockReference>,
     commit_messages: Mutex<HashMap<u64, HashMap<AuthorityIndex, Data<StatementBlock>>>>,
     num_validators: usize,
-    committed_list: CommittedList,
 }
 
 impl Linearizer {
@@ -80,7 +50,6 @@ impl Linearizer {
             committed: HashSet::new(),
             commit_messages: Mutex::new(HashMap::new()),
             num_validators,
-            committed_list: CommittedList::new(),
         }
     }
 
