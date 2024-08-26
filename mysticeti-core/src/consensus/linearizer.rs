@@ -1,19 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashSet, HashMap, VecDeque};
 use std::fmt;
 
-use crate::block_store::{self, BlockStore};
-use crate::core::CommitMessage;
-use crate::validator::Validator;
+use crate::block_store::BlockStore;
+use crate::types::AuthorityIndex;
 use crate::{
     data::Data,
     types::{BlockReference, StatementBlock},
 };
 
-use tokio::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, Mutex};
+use std::sync::Arc;
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
@@ -36,13 +35,43 @@ impl CommittedSubDag {
     }
 }
 
+#[derive(Default)]
+pub struct CommittedList {
+    blocks: VecDeque<Data<StatementBlock>>,
+}
+
+impl CommittedList {
+    pub fn new() -> Self {
+        Self {
+            blocks: VecDeque::new(),
+        }
+    }
+
+    pub fn push(&mut self, block: Data<StatementBlock>) {
+        self.blocks.push_back(block);
+    }
+
+    pub fn extend(&mut self, other: CommittedList) {
+        self.blocks.extend(other.blocks);
+    }
+
+    // Sort the blocks by their hash values, used for sorting the blocks in a complete round
+    pub fn sort(&mut self) {
+        let mut vec: Vec<_> = self.blocks.drain(..).collect();
+        vec.sort_by(|a, b| a.reference().digest.cmp(&b.reference().digest));
+        self.blocks = vec.into();
+    }
+
+}
+
 /// Expand a committed sequence of leader into a sequence of sub-dags.
 #[derive(Default)]
 pub struct Linearizer {
     /// Keep track of all committed blocks to avoid committing the same block twice.
     pub committed: HashSet<BlockReference>,
-    commit_messages: Mutex<HashMap<u64, HashMap<ValidatorId, Data<StatementBlock>>>>,
+    commit_messages: Mutex<HashMap<u64, HashMap<AuthorityIndex, Data<StatementBlock>>>>,
     num_validators: usize,
+    committed_list: CommittedList,
 }
 
 impl Linearizer {
@@ -51,6 +80,7 @@ impl Linearizer {
             committed: HashSet::new(),
             commit_messages: Mutex::new(HashMap::new()),
             num_validators,
+            committed_list: CommittedList::new(),
         }
     }
 
@@ -85,66 +115,75 @@ impl Linearizer {
     }
 
     // Handle commit messages by grouping them by round number and sorting them once all validators have sent their messages for the round.
-    pub fn handle_commit(
+    // Collect blocks from all validators before creating a CommittedSubDag
+    // TODO: Consider removing block_ref
+    pub async fn handle_commit(
         &mut self,
-        block_store: &BlockStore,
         round: u64,
-        validator_id: ValidatorId,
+        validator_id: AuthorityIndex,
+        _block_ref: BlockReference,
         block: Data<StatementBlock>,
-    ) -> Vec<CommittedSubDag> {
-        let mut commit_messages = self.commit_messages.lock().unwrap();
+    ) -> Vec<CommittedSubDag>{
 
-        // Group commit messages by round number
-        let round_messages = commit_messages.entry(round);
+            let mut commit_messages = self.commit_messages.lock().await;
+            let round_messages = commit_messages.entry(round).or_insert(HashMap::new());
+            round_messages.insert(validator_id, block);
 
-        // TODO: does this insert validator_id, block to all messages?
-        round_messages.insert(validator_id, block);
+            // Check if we have received commit messages from all validators for this round
+            if round_messages.len() == self.num_validators {
+                let mut sub_dag_blocks = Vec::new();
+                let mut to_process = VecDeque::new();
 
-        // Check if we have received commit messages from all validators for this round
-        if round_messages.len() == self.num_validators {
-            // Collect and sort the commit messages for this round
-            let mut committed_leaders: Vec<Data<StatementBlock>> = round_messages.values().cloned().collect();
-            committed_leaders.sort_by_key(|x| x.round()); // Sort the blocks by round number
+                // Start with the leader block
+                let leader_block = round_messages.values().next().unwrap().clone();
+                to_process.push_back(leader_block.clone());
+                self.committed.insert(*leader_block.reference());
 
-            // Process each sorted commit message
-            for leader_block in committed_leaders {
-                // Collect the sub-dag generated using each of these leaders as anchor.
-                let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
+                // Collect all blocks in the sub-DAG
+                while let Some(current_block) = to_process.pop_front() {
+                    sub_dag_blocks.push(current_block.clone());
 
-                // Sort the sub-dag using a deterministic algorithm.
+                    for included_ref in current_block.includes() {
+                        if self.committed.insert(*included_ref) {
+                            // Find the included block from the commit messages
+                            if let Some(included_block) = round_messages.values().find(|b| b.reference() == included_ref) {
+                                to_process.push_back(included_block.clone());
+                            }
+                        }
+                    }
+                }
+
+                commit_messages.remove(&round);
+
+                // Create and sort the CommittedSubDag
+                let mut sub_dag = CommittedSubDag::new(*leader_block.reference(), sub_dag_blocks);
                 sub_dag.sort();
-                committed.push(sub_dag);            
-        }
 
-        // Remove the processed round from the commit messages
-        commit_messages.remove(&round);
-
-        }
-
-        committed
+                vec![sub_dag]
+            } else {
+                Vec::new()
+            }
     }
 }
 
 pub struct LinearizerTask {
     global_linearizer: Arc<Mutex<Linearizer>>,
-    receiver: mpsc::Receiver<BlockReference>,
+    receiver: mpsc::Receiver<(BlockReference, Data<StatementBlock>)>,
 }
 
 impl LinearizerTask {
-    pub fn new(receiver: mpsc::Receiver<BlockReference>, linearizer: Arc<Mutex<Linearizer>>) -> Self {
+    pub fn new(receiver: mpsc::Receiver<(BlockReference, Data<StatementBlock>)>, global_linearizer: Arc<Mutex<Linearizer>>) -> Self {
         Self { receiver, global_linearizer }
     }
 
     pub async fn run(mut self) {
         while let Some(block_reference) = self.receiver.recv().await {
             // Process the block reference
+            let (block_reference, block) = block_reference;
+            let (validator_id, round) = block_reference.author_round();
 
-            if let Some(block) = BlockStore::get_block(block_reference) {
-                let (validator_id, round) = block_reference.author_round();
-
-                // Handle the commit
-                self.global_linearizer.handle_commit(&self.block_store, round, validator_id, block);
-            }
+            // Handle the commit
+            self.global_linearizer.lock().await.handle_commit(round, validator_id, block_reference, block);
         }
     }
 }
