@@ -32,6 +32,27 @@ pub trait ImportExport: Serialize + DeserializeOwned {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NetworkConfig {
+    pub machines: Vec<MachineInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MachineInfo {
+    pub ip: IpAddr,
+    pub base_port: u16,
+}
+
+impl NetworkConfig {
+    pub const DEFAULT_FILENAME: &'static str = "network-config.yaml";
+
+    pub fn new(machines: Vec<MachineInfo>) -> Self {
+        Self { machines }
+    }
+}
+
+impl ImportExport for NetworkConfig {}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeParameters {
     #[serde(default = "defaults::default_wave_length")]
     pub wave_length: RoundNumber,
