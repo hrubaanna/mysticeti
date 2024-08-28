@@ -32,27 +32,6 @@ pub trait ImportExport: Serialize + DeserializeOwned {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NetworkConfig {
-    pub machines: Vec<MachineInfo>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MachineInfo {
-    pub ip: IpAddr,
-    pub base_port: u16,
-}
-
-impl NetworkConfig {
-    pub const DEFAULT_FILENAME: &'static str = "network-config.yaml";
-
-    pub fn new(machines: Vec<MachineInfo>) -> Self {
-        Self { machines }
-    }
-}
-
-impl ImportExport for NetworkConfig {}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeParameters {
     #[serde(default = "defaults::default_wave_length")]
     pub wave_length: RoundNumber,
@@ -127,13 +106,14 @@ pub struct NodeIdentifier {
 pub struct NodePublicConfig {
     pub identifiers: Vec<NodeIdentifier>,
     pub parameters: NodeParameters,
+    pub num_instances: usize,
 }
 
 impl NodePublicConfig {
     pub const DEFAULT_FILENAME: &'static str = "public-config.yaml";
     pub const PORT_OFFSET_FOR_TESTS: u16 = 1500;
 
-    pub fn new_for_tests(committee_size: usize) -> Self {
+    pub fn new_for_tests(committee_size: usize, num_instances: usize) -> Self {
         let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
         let benchmark_port_offset = ips.len() as u16;
         let mut identifiers = Vec::new();
@@ -153,14 +133,16 @@ impl NodePublicConfig {
         Self {
             identifiers,
             parameters: NodeParameters::default(),
+            num_instances,
         }
     }
 
-    pub fn new_for_benchmarks(ips: Vec<IpAddr>, node_parameters: Option<NodeParameters>) -> Self {
-        let default_with_ips = Self::new_for_tests(ips.len()).with_ips(ips);
+    pub fn new_for_benchmarks(ips: Vec<IpAddr>, node_parameters: Option<NodeParameters>, num_instances: usize) -> Self {
+        let default_with_ips = Self::new_for_tests(ips.len(), num_instances).with_ips(ips);
         Self {
             identifiers: default_with_ips.identifiers,
             parameters: node_parameters.unwrap_or_default(),
+            num_instances,
         }
     }
 
@@ -185,6 +167,13 @@ impl NodePublicConfig {
     /// Return all network addresses (including our own) in the order of the authority index.
     pub fn all_network_addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         self.identifiers.iter().map(|id| id.network_address)
+    }
+
+    /// Return the network addresses of corresponding validator (including our own) instances
+    pub fn relevant_network_addresses(&self, instance_index: usize) -> impl Iterator<Item = SocketAddr> + '_  {
+    self.identifiers.iter().enumerate()
+        .filter(move |(i, _)| i % self.num_instances == instance_index)
+    .map(|(i, id)| (i as AuthorityIndex, id.network_address))
     }
 
     /// Return all metric addresses (including our own) in the order of the authority index.
