@@ -2,23 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    clone::Clone, fs, net::{IpAddr, Ipv4Addr, SocketAddr}, path::PathBuf, sync::Arc,
+    clone::Clone, collections::HashMap, fs, net::{IpAddr, Ipv4Addr, SocketAddr}, path::PathBuf, sync::Arc, time::Duration
 };
 
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time::timeout};
+use tokio::net::{TcpListener, TcpStream};
 
 use clap::{command, Parser};
 use eyre::{eyre, Context, Result};
 use mysticeti_core::{
     committee::Committee, 
-    config::{ClientParameters, 
-        ImportExport, 
-        NodeParameters, 
-        NodePrivateConfig, 
-        NodePublicConfig
+    config::{ClientParameters, ImportExport, NetworkConfig, NodeParameters, NodePrivateConfig, NodePublicConfig, ValidatorAddress
     }, 
     consensus::linearizer::{Linearizer, LinearizerTask},
-    types::AuthorityIndex, 
+    types::{AuthorityIndex, MachineIndex}, 
     validator::Validator, 
 };
 use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
@@ -50,7 +47,7 @@ enum Operation {
     Run {
         /// The authority index of this node.
         #[clap(long, value_name = "INT")]
-        authority: AuthorityIndex,
+        machine_index: MachineIndex,
         /// Path to the file holding the public committee information.
         #[clap(long, value_name = "FILE")]
         committee_path: String,
@@ -71,7 +68,7 @@ enum Operation {
     DryRun {
         /// The authority index of this node.
         #[clap(long, value_name = "INT")]
-        authority: AuthorityIndex,
+        machine_index: MachineIndex,
         /// The number of authorities in the committee.
         #[clap(long, value_name = "INT")]
         committee_size: usize,
@@ -107,7 +104,7 @@ async fn main() -> Result<()> {
             node_parameters_path,
         } => benchmark_genesis(ips, working_directory, node_parameters_path)?,
         Operation::Run {
-            authority,
+            machine_index,
             committee_path,
             public_config_path,
             private_config_path,
@@ -115,7 +112,7 @@ async fn main() -> Result<()> {
             num_instances,
         } => {
             run(
-                authority,
+                machine_index,
                 committee_path,
                 public_config_path,
                 private_config_path,
@@ -129,7 +126,7 @@ async fn main() -> Result<()> {
             num_instances,
         } => testbed(committee_size, num_instances).await?,
         Operation::DryRun {
-            authority,
+            machine_index,
             committee_size,
             num_instances,
         } => dryrun(authority, committee_size, num_instances).await?,
@@ -246,14 +243,14 @@ fn benchmark_genesis(
 
 /// Boot multiple validator nodes.
 async fn run(
-    authority: AuthorityIndex,
+    machine_index: MachineIndex,
     committee_path: String,
     public_config_path: String,
     private_config_path: String,
     client_parameters_path: String,
     num_instances: usize,
 ) -> Result<()> {
-    tracing::info!("Starting {num_instances} validator(s) with authority {authority}");
+    tracing::info!("Starting {num_instances} validator(s) with authority {machine_index}");
 
     // Create global linarizer
     let global_linearizer = Arc::new(Mutex::new(Linearizer::new(num_instances)));
@@ -267,7 +264,7 @@ async fn run(
     let committee = Arc::new(committee);
 
     let handles = spawn_validator_instances(
-        authority,
+        machine_index,
         num_instances,
         committee,
         public_config,
@@ -285,7 +282,7 @@ fn load_configurations(
     committee_path: &str,
     public_config_path: &str,
     client_parameters_path: &str,
-) -> Result<(Committee, NodePublicConfig, ClientParameters)> {
+) -> Result<(Committee, NodePublicConfig, ClientParameters, NetworkConfig)> {
     let committee = Committee::load(committee_path)
         .wrap_err(format!("Failed to load committee file '{committee_path}'"))?;
     let public_config = NodePublicConfig::load(public_config_path).wrap_err(format!(
@@ -299,7 +296,7 @@ fn load_configurations(
 }
 
 async fn spawn_validator_instances(
-    authority: AuthorityIndex,
+    machine_index: MachineIndex,
     num_instances: usize,
     committee: Arc<Committee>,
     public_config: NodePublicConfig,
@@ -310,16 +307,18 @@ async fn spawn_validator_instances(
     let mut handles = Vec::new();
 
     for i in 0..num_instances {
-        let authority_instance = authority + i as AuthorityIndex;
+        let authority_index = machine_index * num_instances as u64 + i as AuthorityIndex;
         let committee_instance = Arc::clone(&committee);
         let public_config_instance = public_config.clone();
         let unique_private_config_path = format!("{}_{}", private_config_path, i);
         let private_config_instance = load_private_config(&unique_private_config_path, i)?;
         let client_parameters_instance = client_parameters.clone();
         let global_linearizer = Arc::clone(&global_linearizer);
+        let instance_index = i;
 
         let handle = spawn_validator(
-            authority_instance,
+            authority_index,
+            instance_index,
             committee_instance,
             public_config_instance,
             private_config_instance,
@@ -332,6 +331,12 @@ async fn spawn_validator_instances(
     Ok(handles)
 }
 
+async fn read_authority_instance(stream: &mut TcpStream) -> Result<AuthorityIndex> {
+    let mut buf = [0u8; 4];
+    stream.read_exact(&mut buf).await?;
+    Ok(AuthorityIndex::from_be_bytes(buf))
+}
+
 fn load_private_config(unique_private_config_path: &str, instance: usize) -> Result<NodePrivateConfig> {
     NodePrivateConfig::load(unique_private_config_path).wrap_err(format!(
         "Failed to load private configuration file '{unique_private_config_path}' for instance {instance}"
@@ -339,7 +344,8 @@ fn load_private_config(unique_private_config_path: &str, instance: usize) -> Res
 }
 
 fn spawn_validator(
-    authority_instance: AuthorityIndex,
+    authority_index: AuthorityIndex,
+    instance_index: usize,
     committee_instance: Arc<Committee>,
     public_config_instance: NodePublicConfig,
     private_config_instance: NodePrivateConfig,
@@ -353,7 +359,8 @@ fn spawn_validator(
         let (linearizer_task_sender, linearizer_task_receiver) = tokio::sync::mpsc::channel(1024);
 
         let validator = Validator::start(
-            authority_instance, 
+            authority_index, 
+            instance_index,
             committee_instance, 
             &public_config_instance, 
             private_config_instance,
