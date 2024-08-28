@@ -29,7 +29,7 @@ use crate::{
     metrics::{print_network_address_table, Metrics},
     runtime,
     stat::HistogramSender,
-    types::{AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
+    types::{AuthorityIndex, BlockReference, RoundNumber, StatementBlock, CommitMessage},
 };
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -42,6 +42,8 @@ pub enum NetworkMessage {
     RequestBlocks(Vec<BlockReference>),
     /// Indicate that a requested block is not found.
     BlockNotFound(Vec<BlockReference>),
+    /// Indicate that a round has been committed on validator's machine.
+    Commit(CommitMessage),
 }
 
 pub struct Network {
@@ -67,8 +69,9 @@ impl Network {
         our_id: AuthorityIndex,
         local_addr: SocketAddr,
         metrics: Arc<Metrics>,
+        instance_index: usize,
     ) -> Self {
-        let addresses = parameters.all_network_addresses().collect::<Vec<_>>();
+        let addresses = parameters.relevant_network_addresses(instance_index).collect::<Vec<_>>();
         print_network_address_table(&addresses);
         Self::from_socket_addresses(&addresses, our_id as usize, local_addr, metrics).await
     }
