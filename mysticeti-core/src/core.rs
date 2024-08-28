@@ -15,17 +15,15 @@ use crate::{
         WAL_ENTRY_COMMIT,
         WAL_ENTRY_PAYLOAD,
         WAL_ENTRY_STATE,
-    }, committee::Committee, config::NodePublicConfig, consensus::{
+    }, 
+    committee::Committee, config::NodePublicConfig, consensus::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
-    }, crypto::{dummy_signer, Signer}, data::Data, epoch_close::EpochManager, metrics::{Metrics, UtilizationTimerVecExt}, runtime::timestamp_utc, state::RecoveredState, threshold_clock::ThresholdClockAggregator, types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock}, wal::{WalPosition, WalSyncer, WalWriter}
+    }, 
+    crypto::{dummy_signer, Signer}, data::Data, epoch_close::EpochManager, metrics::{Metrics, UtilizationTimerVecExt}, network::{Network, NetworkMessage}, runtime::timestamp_utc, state::RecoveredState, threshold_clock::ThresholdClockAggregator, types::{AuthorityIndex, BaseStatement, BlockReference, CommitMessage, RoundNumber, StatementBlock}, wal::{WalPosition, WalSyncer, WalWriter},
 };
 
 use tokio::sync::mpsc;
-
-pub enum CommitMessage {
-    DagRoundCommit(RoundNumber),
-}
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -46,8 +44,9 @@ pub struct Core<H: BlockHandler> {
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
-    validator_notifier: mpsc::Sender<CommitMessage>,
+    // network: Network,
     linearizer_sender: mpsc::Sender<(BlockReference, Data<StatementBlock>)>,
+    commit_sender: mpsc::Sender<NetworkMessage>,
 }
 
 pub struct CoreOptions {
@@ -71,8 +70,8 @@ impl<H: BlockHandler> Core<H> {
         recovered: RecoveredState,
         mut wal_writer: WalWriter,
         options: CoreOptions,
-        validator_notifier: mpsc::Sender<CommitMessage>,
         linearizer_sender: mpsc::Sender<(BlockReference, Data<StatementBlock>)>,
+        commit_sender: mpsc::Sender<NetworkMessage>,
     ) -> Self {
         let RecoveredState {
             block_store,
@@ -148,8 +147,8 @@ impl<H: BlockHandler> Core<H> {
             epoch_manager,
             rounds_in_epoch: config.parameters.rounds_in_epoch,
             committer,
-            validator_notifier,
             linearizer_sender,
+            commit_sender,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -351,7 +350,8 @@ impl<H: BlockHandler> Core<H> {
             self.linearizer_sender.send((*last.reference(), last.clone())).await.unwrap();
 
             // Notify all validators about the committed round
-            self.validator_notifier.send(CommitMessage::DagRoundCommit(last.reference().round())).await;
+            let commit_message = NetworkMessage::Commit(CommitMessage { round: last.reference().round() });
+            self.commit_sender.send(commit_message).await.ok();
         }
 
         // todo: should ideally come from execution result of epoch smart contract
