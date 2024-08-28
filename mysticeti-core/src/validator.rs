@@ -7,6 +7,7 @@ use std::{
 };
 
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 use ::prometheus::Registry;
 use eyre::{eyre, Context, Result};
@@ -20,7 +21,7 @@ use crate::{
     log::TransactionLog,
     metrics::Metrics,
     net_sync::NetworkSyncer,
-    network::Network,
+    network::{Network, NetworkMessage},
     prometheus,
     runtime::{JoinError, JoinHandle},
     transactions_generator::TransactionGenerator,
@@ -33,11 +34,16 @@ use crate::{
 pub struct Validator {
     network_synchronizer: NetworkSyncer<RealBlockHandler, TestCommitHandler<TransactionLog>>,
     metrics_handle: JoinHandle<Result<(), hyper::Error>>,
+    authority_instance: AuthorityIndex,
+    // network: Network,
 }
 
 impl Validator {
     pub async fn start(
+        // Authority is the unique index of the validator
         authority: AuthorityIndex,
+        // Instance index is the index of the logical validator 
+        instance_index: usize,
         committee: Arc<Committee>,
         public_config: &NodePublicConfig,
         private_config: NodePrivateConfig,
@@ -100,8 +106,17 @@ impl Validator {
             global_linearizer.clone(),
         );
 
-        // Create the channel for commits
-        let (commit_sender, _commit_receiver) = tokio::sync::mpsc::channel(1024);
+        let network = Network::load(
+            public_config,
+            authority,
+            binding_network_address,
+            metrics.clone(),
+            instance_index,
+        )
+        .await;
+        
+        // Channel for core to send commit messages to network synchronizer
+        let (commit_sender, commit_receiver) = mpsc::channel::<NetworkMessage>(100);
 
         let core = Core::open(
             block_handler,
@@ -112,16 +127,10 @@ impl Validator {
             recovered,
             wal_writer,
             CoreOptions::default(),
-            commit_sender,
             linearizer_sender,
+            commit_sender,
         );
-        let network = Network::load(
-            public_config,
-            authority,
-            binding_network_address,
-            metrics.clone(),
-        )
-        .await;
+        
         let network_synchronizer = NetworkSyncer::start(
             network,
             core,
@@ -130,6 +139,7 @@ impl Validator {
             public_config.parameters.shutdown_grace_period,
             metrics,
             global_linearizer,
+            commit_receiver,
         );
 
         tracing::info!("Validator {authority} listening on {network_address}");
@@ -139,6 +149,8 @@ impl Validator {
         Ok(Self {
             network_synchronizer,
             metrics_handle,
+            authority_instance: authority,
+            //network,
         })
     }
 
@@ -195,12 +207,14 @@ mod smoke_tests {
         }
     }
 
+    // TODO: Fix this test
     /// Ensure that a committee of honest validators commits.
     #[tokio::test]
     async fn validator_commit() {
         let committee_size = 4;
+        let num_instances = 2;
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config = NodePublicConfig::new_for_tests(committee_size).with_port_offset(0);
+        let public_config = NodePublicConfig::new_for_tests(committee_size, num_instances).with_port_offset(0);
         let client_parameters = ClientParameters::default();
 
         let global_linearizer = Arc::new(Mutex::new(Linearizer::new()));
@@ -216,6 +230,7 @@ mod smoke_tests {
 
             let validator = Validator::start(
                 authority,
+
                 committee.clone(),
                 &public_config,
                 private_config,
