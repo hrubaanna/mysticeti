@@ -7,7 +7,7 @@ use std::{
 };
 
 use tokio::sync::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 use ::prometheus::Registry;
 use eyre::{eyre, Context, Result};
@@ -116,7 +116,7 @@ impl Validator {
         .await;
         
         // Channel for core to send commit messages to network synchronizer
-        let (commit_sender, commit_receiver) = mpsc::channel::<NetworkMessage>(100);
+        let (local_commit_sender, local_commit_receiver) = broadcast::channel::<NetworkMessage>(100);
 
         let core = Core::open(
             block_handler,
@@ -128,7 +128,7 @@ impl Validator {
             wal_writer,
             CoreOptions::default(),
             linearizer_sender,
-            commit_sender,
+            local_commit_sender,
         );
         
         let network_synchronizer = NetworkSyncer::start(
@@ -139,7 +139,7 @@ impl Validator {
             public_config.parameters.shutdown_grace_period,
             metrics,
             global_linearizer,
-            commit_receiver,
+            local_commit_receiver,
         );
 
         tracing::info!("Validator {authority} listening on {network_address}");

@@ -10,7 +10,7 @@ use std::{
 use futures::future::join_all;
 use tokio::{
     select,
-    sync::{mpsc, oneshot, Notify, Mutex},
+    sync::{mpsc, broadcast, oneshot, Notify, Mutex},
 };
 
 use crate::{
@@ -20,15 +20,16 @@ use crate::{
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
 
-pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
+pub struct NetworkSyncer<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 'static> {
     inner: Arc<NetworkSyncerInner<H, C>>,
     main_task: JoinHandle<()>,
     syncer_task: oneshot::Receiver<()>,
     stop: mpsc::Receiver<()>,
     global_linearizer: Arc<Mutex<Linearizer>>,
+    local_commit_receiver: broadcast::Receiver<NetworkMessage>,
 }
 
-pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
+pub struct NetworkSyncerInner<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 'static> {
     pub syncer: CoreThreadDispatcher<H, Arc<Notify>, C>,
     pub block_store: BlockStore,
     pub notify: Arc<Notify>,
@@ -38,7 +39,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub epoch_closing_time: Arc<AtomicU64>,
 }
 
-impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
+impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 'static> NetworkSyncer<H, C> {
     pub fn start(
         network: Network,
         mut core: Core<H>,
@@ -47,6 +48,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         shutdown_grace_period: Duration,
         metrics: Arc<Metrics>,
         global_linearizer: Arc<Mutex<Linearizer>>,
+        local_commit_receiver: broadcast::Receiver<NetworkMessage>,
+
     ) -> Self {
         let authority_index = core.authority();
         let handle = Handle::current();
@@ -93,14 +96,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             shutdown_grace_period,
             block_fetcher,
             metrics.clone(),
+            local_commit_receiver,
         ));
         let syncer_task = AsyncWalSyncer::start(wal_syncer, stop_sender, epoch_sender);
+        
         Self {
             inner,
             main_task,
             stop: stop_receiver,
             syncer_task,
             global_linearizer,
+            local_commit_receiver,
         }
     }
 
@@ -122,6 +128,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         shutdown_grace_period: Duration,
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
+        local_commit_receiver: broadcast::Receiver<NetworkMessage>,
     ) {
         let mut connections: HashMap<usize, JoinHandle<Option<()>>> = HashMap::new();
         let handle = Handle::current();
@@ -147,6 +154,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 inner.clone(),
                 block_fetcher.clone(),
                 metrics.clone(),
+                local_commit_receiver.resubscribe(),
             ));
             connections.insert(peer_id, task);
         }
@@ -167,6 +175,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         inner: Arc<NetworkSyncerInner<H, C>>,
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
+        local_commit_receiver: broadcast::Receiver<NetworkMessage>,
     ) -> Option<()> {
         let last_seen = inner
             .block_store
@@ -177,11 +186,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .await
             .ok()?;
 
-        let mut disseminator = BlockDisseminator::new(
+        let mut disseminator =  BlockDisseminator::new(
             connection.sender.clone(),
             inner.clone(),
             SynchronizerParameters::default(),
             metrics.clone(),
+            local_commit_receiver.resubscribe(), // Create a new receiver for each disseminator
         );
 
         let id = connection.peer_id as AuthorityIndex;
@@ -224,6 +234,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 NetworkMessage::BlockNotFound(_references) => {
                     // TODO: leverage this signal to request blocks from other peers
                 }
+                NetworkMessage::Commit(commit) => {
+                    // TODO: propagate commit to the core
+                }
             }
         }
         inner.syncer.authority_connection(id, false).await;
@@ -231,6 +244,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         block_fetcher.remove_authority(id).await;
         None
     }
+
 
     async fn leader_timeout_task(
         inner: Arc<NetworkSyncerInner<H, C>>,

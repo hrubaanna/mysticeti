@@ -34,7 +34,7 @@ use crate::{
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum NetworkMessage {
     SubscribeOwnFrom(RoundNumber), // subscribe from round number excluding
     Block(Data<StatementBlock>),

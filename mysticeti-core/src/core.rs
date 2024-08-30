@@ -23,7 +23,7 @@ use crate::{
     crypto::{dummy_signer, Signer}, data::Data, epoch_close::EpochManager, metrics::{Metrics, UtilizationTimerVecExt}, network::{Network, NetworkMessage}, runtime::timestamp_utc, state::RecoveredState, threshold_clock::ThresholdClockAggregator, types::{AuthorityIndex, BaseStatement, BlockReference, CommitMessage, RoundNumber, StatementBlock}, wal::{WalPosition, WalSyncer, WalWriter},
 };
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, broadcast};
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -46,7 +46,7 @@ pub struct Core<H: BlockHandler> {
     committer: UniversalCommitter,
     // network: Network,
     linearizer_sender: mpsc::Sender<(BlockReference, Data<StatementBlock>)>,
-    commit_sender: mpsc::Sender<NetworkMessage>,
+    local_commit_sender: broadcast::Sender<NetworkMessage>,
 }
 
 pub struct CoreOptions {
@@ -71,7 +71,7 @@ impl<H: BlockHandler> Core<H> {
         mut wal_writer: WalWriter,
         options: CoreOptions,
         linearizer_sender: mpsc::Sender<(BlockReference, Data<StatementBlock>)>,
-        commit_sender: mpsc::Sender<NetworkMessage>,
+        local_commit_sender: broadcast::Sender<NetworkMessage>,
     ) -> Self {
         let RecoveredState {
             block_store,
@@ -148,7 +148,7 @@ impl<H: BlockHandler> Core<H> {
             rounds_in_epoch: config.parameters.rounds_in_epoch,
             committer,
             linearizer_sender,
-            commit_sender,
+            local_commit_sender,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -351,7 +351,7 @@ impl<H: BlockHandler> Core<H> {
 
             // Notify all validators about the committed round
             let commit_message = NetworkMessage::Commit(CommitMessage { round: last.reference().round() });
-            self.commit_sender.send(commit_message).await.ok();
+            self.local_commit_sender.send(commit_message).ok();
         }
 
         // todo: should ideally come from execution result of epoch smart contract
