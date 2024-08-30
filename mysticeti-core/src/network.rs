@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
+use std::{collections::{HashMap, HashSet}, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
 
 use futures::{
     future::{select, select_all, Either},
@@ -44,6 +44,44 @@ pub enum NetworkMessage {
     BlockNotFound(Vec<BlockReference>),
     /// Indicate that a round has been committed on validator's machine.
     Commit(CommitMessage),
+}
+
+pub struct CommitTracker {
+    commit_records: HashMap<RoundNumber, (HashSet<AuthorityIndex>, Option<Data<StatementBlock>>)>,
+    total_validators: usize,
+}
+
+impl CommitTracker {
+    pub fn new(total_validators: usize) -> Self {
+        Self {
+            commit_records: HashMap::new(),
+            total_validators,
+        }
+    }
+
+    pub fn record_commit(&mut self, round: RoundNumber, validator: AuthorityIndex) -> bool {
+        let (validators, _) = self.commit_records.entry(round).or_insert_with(|| (HashSet::new(), None));
+        validators.insert(validator);
+        validators.len() == self.total_validators
+    }
+
+    pub fn set_block(&mut self, round: RoundNumber, block: Data<StatementBlock>) {
+        self.commit_records.entry(round).or_insert_with(|| (HashSet::new(), None)).1 = Some(block);
+    }
+
+    pub fn is_round_committed(&self, round: RoundNumber) -> bool {
+        self.commit_records
+            .get(&round)
+            .map_or(false, |(validators, _)| validators.len() == self.total_validators)
+    }
+
+    pub fn take_committed_block(&mut self, round: RoundNumber) -> Option<Data<StatementBlock>> {
+        self.commit_records.get_mut(&round).and_then(|(_, block)| block.take())
+    }
+
+    pub fn cleanup_old_rounds(&mut self, up_to_round: RoundNumber) {
+        self.commit_records.retain(|&r, _| r >= up_to_round);
+    }
 }
 
 pub struct Network {

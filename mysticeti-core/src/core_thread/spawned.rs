@@ -31,6 +31,8 @@ enum CoreThreadCommand {
     ConnectionEstablished(AuthorityIndex, oneshot::Sender<()>),
     /// Indicate that a connection to an authority was dropped.
     ConnectionDropped(AuthorityIndex, oneshot::Sender<()>),
+    // Update the commit tracker with the committed block
+    HandleRemoteCommit(RoundNumber, AuthorityIndex, oneshot::Sender<()>),
 }
 
 impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 'static>
@@ -101,6 +103,12 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
             panic!("core thread is not expected to stop");
         }
     }
+
+    pub async fn handle_remote_commit(&self, round: RoundNumber, validator: AuthorityIndex) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::HandleRemoteCommit(round, validator, sender)).await;
+        receiver.await.expect("core thread is not expected to stop")
+    }
 }
 
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
@@ -133,6 +141,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                 }
                 CoreThreadCommand::ConnectionDropped(authority, sender) => {
                     self.syncer.connected_authorities.remove(&authority);
+                    sender.send(()).ok();
+                }
+                CoreThreadCommand::HandleRemoteCommit(round, validator, sender) => {
+                    self.syncer.handle_remote_commit(round, validator);
                     sender.send(()).ok();
                 }
             }

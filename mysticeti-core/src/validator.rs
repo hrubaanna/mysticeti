@@ -40,6 +40,7 @@ pub struct Validator {
 
 impl Validator {
     pub async fn start(
+        num_instances: usize,
         // Authority is the unique index of the validator
         authority: AuthorityIndex,
         // Instance index is the index of the logical validator 
@@ -120,6 +121,7 @@ impl Validator {
 
         let core = Core::open(
             block_handler,
+            num_instances,
             authority,
             committee.clone(),
             public_config,
