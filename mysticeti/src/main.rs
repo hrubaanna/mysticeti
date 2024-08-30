@@ -42,6 +42,9 @@ enum Operation {
         /// Path to the file holding the node parameters. If not provided, default parameters are used.
         #[clap(long, value_name = "FILE")]
         node_parameters_path: Option<PathBuf>,
+        /// The number of validator instances to run.
+        #[clap(long, value_name = "INT")]
+        num_instances: usize,
     },
     /// Run a validator node.
     Run {
@@ -102,7 +105,8 @@ async fn main() -> Result<()> {
             ips,
             working_directory,
             node_parameters_path,
-        } => benchmark_genesis(ips, working_directory, node_parameters_path)?,
+            num_instances,
+        } => benchmark_genesis(ips, working_directory, node_parameters_path, num_instances)?,
         Operation::Run {
             machine_index,
             committee_path,
@@ -139,6 +143,7 @@ fn benchmark_genesis(
     ips: Vec<IpAddr>,
     working_directory: PathBuf,
     node_parameters_path: Option<PathBuf>,
+    num_instances: usize,
 ) -> Result<()> {
     tracing::info!("Generating benchmark genesis files");
     fs::create_dir_all(&working_directory).wrap_err(format!(
@@ -164,7 +169,7 @@ fn benchmark_genesis(
         None => NodeParameters::default(),
     };
 
-    let node_public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
+    let node_public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters), num_instances);
     let mut node_public_config_path = working_directory.clone();
     node_public_config_path.push(NodePublicConfig::DEFAULT_FILENAME);
     node_public_config
@@ -317,6 +322,7 @@ async fn spawn_validator_instances(
         let instance_index = i;
 
         let handle = spawn_validator(
+            num_instances,
             authority_index,
             instance_index,
             committee_instance,
@@ -344,6 +350,7 @@ fn load_private_config(unique_private_config_path: &str, instance: usize) -> Res
 }
 
 fn spawn_validator(
+    num_instances: usize,
     authority_index: AuthorityIndex,
     instance_index: usize,
     committee_instance: Arc<Committee>,
@@ -359,6 +366,7 @@ fn spawn_validator(
         let (linearizer_task_sender, linearizer_task_receiver) = tokio::sync::mpsc::channel(1024);
 
         let validator = Validator::start(
+            num_instances,
             authority_index, 
             instance_index,
             committee_instance, 
