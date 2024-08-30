@@ -5,7 +5,7 @@ use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use futures::future::join_all;
 use rand::{seq::SliceRandom, thread_rng};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::{
     block_handler::BlockHandler,
@@ -49,7 +49,7 @@ impl Default for SynchronizerParameters {
     }
 }
 
-pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
+pub struct BlockDisseminator<H: BlockHandler + 'static, C: CommitObserver + 'static>  {
     /// The sender to the network.
     sender: mpsc::Sender<NetworkMessage>,
     /// The inner state of the network syncer.
@@ -62,6 +62,8 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
     parameters: SynchronizerParameters,
     /// Metrics.
     metrics: Arc<Metrics>,
+    /// Channel to notify the network about a commit.
+    local_commit_receiver: broadcast::Receiver<NetworkMessage>,
 }
 
 impl<H, C> BlockDisseminator<H, C>
@@ -74,15 +76,34 @@ where
         inner: Arc<NetworkSyncerInner<H, C>>,
         parameters: SynchronizerParameters,
         metrics: Arc<Metrics>,
+        local_commit_receiver: broadcast::Receiver<NetworkMessage>,
     ) -> Self {
-        Self {
+        let this = Self {
             sender,
             inner,
             own_blocks: None,
             other_blocks: Vec::new(),
             parameters,
             metrics,
-        }
+            local_commit_receiver,
+        };
+
+        this.spawn_commit_handler();
+        this
+    }
+
+    fn spawn_commit_handler(&self) {
+        let mut receiver = self.local_commit_receiver.resubscribe();
+        let sender = self.sender.clone();
+        Handle::current().spawn(async move {
+            while let Ok(message) = receiver.recv().await {
+                if let NetworkMessage::Commit(commit) = message {
+                    if let Err(e) = sender.send(NetworkMessage::Commit(commit)).await {
+                        tracing::warn!("Failed to send commit to network: {:?}", e);
+                    }
+                }
+            }
+        });
     }
 
     pub async fn shutdown(mut self) {
@@ -135,6 +156,7 @@ where
             round,
             self.parameters.batch_size,
         ));
+
         self.own_blocks = Some(handle);
     }
 
