@@ -63,6 +63,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
+    pub fn handle_remote_commit(&self, round: RoundNumber, validator: AuthorityIndex) {
+        self.core.handle_remote_commit(round, validator);
+    }
+
     pub fn add_blocks(&mut self, blocks: Vec<Data<StatementBlock>>) {
         let _timer = self
             .metrics

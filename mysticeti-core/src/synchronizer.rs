@@ -268,7 +268,7 @@ impl BlockFetcher {
     }
 }
 
-struct BlockFetcherWorker<B: BlockHandler, C: CommitObserver> {
+struct BlockFetcherWorker<B: BlockHandler + 'static, C: CommitObserver + 'static>  {
     id: AuthorityIndex,
     inner: Arc<NetworkSyncerInner<B, C>>,
     receiver: mpsc::Receiver<BlockFetcherMessage>,

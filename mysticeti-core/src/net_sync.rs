@@ -234,8 +234,8 @@ impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 
                 NetworkMessage::BlockNotFound(_references) => {
                     // TODO: leverage this signal to request blocks from other peers
                 }
-                NetworkMessage::Commit(commit) => {
-                    // TODO: propagate commit to the core
+                NetworkMessage::Commit(commit_message) => {
+                    inner.syncer.handle_remote_commit(commit_message.round, connection.peer_id as AuthorityIndex).await;
                 }
             }
         }
