@@ -20,7 +20,7 @@ use crate::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     }, 
-    crypto::{dummy_signer, Signer}, data::Data, epoch_close::EpochManager, metrics::{Metrics, UtilizationTimerVecExt}, network::{Network, NetworkMessage}, runtime::timestamp_utc, state::RecoveredState, threshold_clock::ThresholdClockAggregator, types::{AuthorityIndex, BaseStatement, BlockReference, CommitMessage, RoundNumber, StatementBlock}, wal::{WalPosition, WalSyncer, WalWriter},
+    crypto::{dummy_signer, Signer}, data::Data, epoch_close::EpochManager, metrics::{Metrics, UtilizationTimerVecExt}, network::{Network, NetworkMessage, CommitTracker}, runtime::timestamp_utc, state::RecoveredState, threshold_clock::ThresholdClockAggregator, types::{AuthorityIndex, BaseStatement, BlockReference, CommitMessage, RoundNumber, StatementBlock}, wal::{WalPosition, WalSyncer, WalWriter},
 };
 
 use tokio::sync::{mpsc, broadcast};
@@ -47,6 +47,7 @@ pub struct Core<H: BlockHandler> {
     // network: Network,
     linearizer_sender: mpsc::Sender<(BlockReference, Data<StatementBlock>)>,
     local_commit_sender: broadcast::Sender<NetworkMessage>,
+    commit_tracker: CommitTracker,
 }
 
 pub struct CoreOptions {
@@ -63,6 +64,7 @@ impl<H: BlockHandler> Core<H> {
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         mut block_handler: H,
+        num_instances: usize,
         authority: AuthorityIndex,
         committee: Arc<Committee>,
         config: &NodePublicConfig,
@@ -129,6 +131,8 @@ impl<H: BlockHandler> Core<H> {
         tracing::info!("Pipeline enabled: {}", config.parameters.enable_pipelining);
         tracing::info!("Number of leaders: {}", config.parameters.number_of_leaders);
 
+        let commit_tracker = CommitTracker::new(num_instances);
+
         let mut this = Self {
             block_manager,
             pending,
@@ -149,6 +153,7 @@ impl<H: BlockHandler> Core<H> {
             committer,
             linearizer_sender,
             local_commit_sender,
+            commit_tracker,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -335,6 +340,35 @@ impl<H: BlockHandler> Core<H> {
         self.metrics.proposed_block_vote_count.observe(votes);
     }
 
+    pub fn handle_remote_commit(&mut self, round: RoundNumber, validator: AuthorityIndex) {
+        if self.commit_tracker.record_commit(round, validator) {
+            self.finalize_commit(round);
+        }
+    }
+
+    pub async fn finalize_commit(&mut self, round: RoundNumber) {
+        // Update the Universal Committer
+        //self.committer.update_remote_commit(round);
+
+        // Send the committed block to the LinearizerTask
+        // Send BlockReference and Data<StatementBlock>to LinearizerTask
+        if let Some(block) = self.commit_tracker.take_committed_block(round) {
+            self.linearizer_sender.send((*block.reference(), block.clone())).await.unwrap();
+        }
+
+        // Update the block store
+        // self.block_store.mark_committed_up_to(round);
+
+
+        // Cleanup old rounds
+        self.commit_tracker.cleanup_old_rounds(round);
+
+        // Optionally, you can log the commit or update any other components that need to know about commits
+        tracing::info!("Finalized remote commit for round {}", round);
+    }
+
+
+
     pub async fn try_commit(&mut self) -> Vec<Data<StatementBlock>> {
         let sequence: Vec<_> = self
             .committer
@@ -345,9 +379,9 @@ impl<H: BlockHandler> Core<H> {
 
         if let Some(last) = sequence.last() {
             self.last_commit_leader = *last.reference();
-            
-            // Send BlockReference and Data<StatementBlock>to LinearizerTask
-            self.linearizer_sender.send((*last.reference(), last.clone())).await.unwrap();
+
+            // Store the block in CommitTracker
+            self.commit_tracker.set_block(last.reference().round(), last.clone());
 
             // Notify all validators about the committed round
             let commit_message = NetworkMessage::Commit(CommitMessage { round: last.reference().round() });
