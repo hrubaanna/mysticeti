@@ -9,6 +9,7 @@ use crate::{data::Data, types::BlockReference};
 use std::sync::Arc;
 use std::{collections::HashSet, thread};
 use tokio::sync::{mpsc, oneshot};
+use tokio::runtime::Runtime;
 
 pub struct CoreThreadDispatcher<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     sender: mpsc::Sender<CoreThreadCommand>,
@@ -42,10 +43,16 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         let (sender, receiver) = mpsc::channel(32);
         let metrics = syncer.core().metrics.clone();
         let core_thread = CoreThread { syncer, receiver };
+        let runtime = Runtime::new().unwrap();
         let join_handle = thread::Builder::new()
             .name("mysticeti-core".to_string())
-            .spawn(move || core_thread.run())
+            .spawn(move || {
+                runtime.block_on(async { 
+                    core_thread.run().await
+                })
+            })
             .unwrap();
+
         Self {
             sender,
             join_handle,
@@ -112,19 +119,19 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
 }
 
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
-    pub fn run(mut self) -> Syncer<H, S, C> {
+    pub async fn run(mut self) -> Syncer<H, S, C> {
         tracing::info!("Started core thread with tid {}", gettid::gettid());
         let metrics = self.syncer.core().metrics.clone();
-        while let Some(command) = self.receiver.blocking_recv() {
+        while let Some(command) = self.receiver.recv().await {
             let _timer = metrics.core_lock_util.utilization_timer();
             metrics.core_lock_dequeued.inc();
             match command {
                 CoreThreadCommand::AddBlocks(blocks, sender) => {
-                    self.syncer.add_blocks(blocks);
+                    self.syncer.add_blocks(blocks).await;
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ForceNewBlock(round, sender) => {
-                    self.syncer.force_new_block(round);
+                    self.syncer.force_new_block(round).await;
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::Cleanup(sender) => {
@@ -144,7 +151,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::HandleRemoteCommit(round, validator, sender) => {
-                    self.syncer.handle_remote_commit(round, validator);
+                    self.syncer.handle_remote_commit(round, validator).await;
                     sender.send(()).ok();
                 }
             }

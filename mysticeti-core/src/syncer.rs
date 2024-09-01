@@ -63,24 +63,24 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
-    pub fn handle_remote_commit(&self, round: RoundNumber, validator: AuthorityIndex) {
-        self.core.handle_remote_commit(round, validator);
+    pub async fn handle_remote_commit(&mut self, round: RoundNumber, validator: AuthorityIndex) {
+        self.core.handle_remote_commit(round, validator).await;
     }
 
-    pub fn add_blocks(&mut self, blocks: Vec<Data<StatementBlock>>) {
+    pub async fn add_blocks(&mut self, blocks: Vec<Data<StatementBlock>>) {
         let _timer = self
             .metrics
             .utilization_timer
             .utilization_timer("Syncer::add_blocks");
         self.core.add_blocks(blocks);
-        self.try_new_block();
+        self.try_new_block().await;
     }
 
-    pub fn force_new_block(&mut self, round: RoundNumber) -> bool {
+    pub async fn force_new_block(&mut self, round: RoundNumber) -> bool {
         if self.core.last_proposed() == round {
             self.metrics.leader_timeout_total.inc();
             self.force_new_block = true;
-            self.try_new_block();
+            self.try_new_block().await;
             true
         } else {
             false
@@ -191,9 +191,9 @@ mod tests {
         fn handle_event(&mut self, event: Self::Event) {
             match event {
                 SyncerEvent::ForceNewBlock(round) => {
-                    if self.force_new_block(round) {
-                        // eprintln!("[{:06} {}] Proposal timeout for {round}", scheduler.time_ms(), self.core.authority());
-                    }
+                    // if self.force_new_block(round) {
+                    //     // eprintln!("[{:06} {}] Proposal timeout for {round}", scheduler.time_ms(), self.core.authority());
+                    // }
                 }
                 SyncerEvent::DeliverBlock(block) => {
                     // eprintln!("[{:06} {}] Deliver {block}", scheduler.time_ms(), self.core.authority());
@@ -236,7 +236,7 @@ mod tests {
     pub fn test_syncer_at(seed: u64) {
         eprintln!("Seed {seed}");
         let rng = rng_at_seed(seed);
-        let (committee, syncers) = committee_and_syncers(4);
+        let (committee, syncers) = committee_and_syncers(4, 2);
         let mut simulator = Simulator::new(syncers, rng);
 
         // Kick off process by asking validators create a block after genesis

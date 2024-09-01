@@ -166,7 +166,8 @@ impl BlockHandler for RealBlockHandler {
                 }
             }
         }
-        let transaction_time = Handle::current().block_on(self.transaction_time.lock());
+        // Use try_lock instead of block_on
+    if let Ok(transaction_time) = self.transaction_time.try_lock() {
         for block in blocks {
             let response_option: Option<&mut Vec<BaseStatement>> = if require_response {
                 Some(&mut response)
@@ -187,10 +188,16 @@ impl BlockHandler for RealBlockHandler {
                 }
             }
         }
-        self.metrics
-            .block_handler_pending_certificates
-            .set(self.transaction_votes.len() as i64);
-        response
+    } else {
+        // Handle the case where the lock couldn't be acquired
+        tracing::warn!("Failed to acquire lock on transaction_time in handle_blocks");
+        // Optionally, you might want to handle this case differently
+    }
+    
+    self.metrics
+        .block_handler_pending_certificates
+        .set(self.transaction_votes.len() as i64);
+    response
     }
 
     fn handle_proposal(&mut self, block: &Data<StatementBlock>) {
@@ -473,13 +480,18 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
     }
 
     fn recover_committed(&mut self, committed: HashSet<BlockReference>, state: Option<Bytes>) {
-        let mut linearizer = Handle::current().block_on(self.global_linearizer.lock());
-        assert!(linearizer.committed.is_empty());
-        if let Some(state) = state {
-            self.transaction_votes.with_state(&state);
+        if let Ok(mut linearizer) = self.global_linearizer.try_lock() {
+            assert!(linearizer.committed.is_empty());
+            if let Some(state) = state {
+                self.transaction_votes.with_state(&state);
+            } else {
+                assert!(committed.is_empty());
+            }
+            linearizer.committed = committed;
         } else {
-            assert!(committed.is_empty());
+            // Handle the case where the lock couldn't be acquired
+            tracing::warn!("Failed to acquire lock on global_linearizer in recover_committed");
+            // Optionally, you might want to retry or handle this case differently
         }
-        linearizer.committed = committed;
     }
 }

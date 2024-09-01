@@ -110,8 +110,9 @@ impl Network {
         instance_index: usize,
     ) -> Self {
         let addresses = parameters.relevant_network_addresses(instance_index).collect::<Vec<_>>();
-        print_network_address_table(&addresses);
-        Self::from_socket_addresses(&addresses, our_id as usize, local_addr, metrics).await
+    let addresses: Vec<SocketAddr> = addresses.iter().map(|(_, addr)| *addr).collect();
+    print_network_address_table(&addresses);
+    Self::from_socket_addresses(&addresses, our_id as usize, local_addr, metrics).await
     }
 
     pub fn connection_receiver(&mut self) -> &mut mpsc::Receiver<Connection> {

@@ -34,8 +34,6 @@ use crate::{
 pub struct Validator {
     network_synchronizer: NetworkSyncer<RealBlockHandler, TestCommitHandler<TransactionLog>>,
     metrics_handle: JoinHandle<Result<(), hyper::Error>>,
-    authority_instance: AuthorityIndex,
-    // network: Network,
 }
 
 impl Validator {
@@ -50,7 +48,7 @@ impl Validator {
         private_config: NodePrivateConfig,
         client_parameters: ClientParameters,
         linearizer_sender: tokio::sync::mpsc::Sender<(BlockReference, Data<StatementBlock>)>,
-        global_linearizer: Arc<Mutex<Linearizer>>,
+        global_linearizer: Arc<tokio::sync::Mutex<Linearizer>>,
     ) -> Result<Self> {
         let network_address = public_config
             .network_address(authority)
@@ -149,10 +147,8 @@ impl Validator {
         
 
         Ok(Self {
-            network_synchronizer,
+            network_synchronizer: network_synchronizer.await,
             metrics_handle,
-            authority_instance: authority,
-            //network,
         })
     }
 
@@ -217,6 +213,7 @@ mod smoke_tests {
     async fn validator_commit() {
         let committee_size = 4;
         let num_instances = 2;
+        let num_machines = 2;
         let committee = Committee::new_for_benchmarks(committee_size);
         let public_config = NodePublicConfig::new_for_tests(committee_size, num_instances).with_port_offset(0);
         let client_parameters = ClientParameters::default();
@@ -224,7 +221,7 @@ mod smoke_tests {
         let global_linearizer = Arc::new(Mutex::new(Linearizer::new(num_instances)));
         let mut handles = Vec::new();
         let dir = TempDir::new("validator_commit").unwrap();
-        let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
+        let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), num_machines, num_instances);
         private_configs.iter().for_each(|private_config| {
             fs::create_dir_all(&private_config.storage_path).unwrap();
         });
@@ -233,10 +230,10 @@ mod smoke_tests {
             
             let (linearizer_task_sender, linearizer_task_receiver) = tokio::sync::mpsc::channel(1024);
     
-            let linearizer_task = LinearizerTask::new(
-                linearizer_task_receiver,
-                global_linearizer,
-            );
+            // let linearizer_task = LinearizerTask::new(
+            //     linearizer_task_receiver,
+            //     Arc::clone(&global_linearizer),
+            // );
 
             let authority = i as AuthorityIndex;
             let instance_index = i;
@@ -249,7 +246,7 @@ mod smoke_tests {
                 private_config,
                 client_parameters.clone(),
                 linearizer_task_sender,
-                global_linearizer,
+                Arc::clone(&global_linearizer),
             )
             .await
             .unwrap();
@@ -274,13 +271,14 @@ mod smoke_tests {
         let machine_index = 0;
         let committee_size = 4;
         let num_instances = 2;
+        let num_machines = 2;
         let committee = Committee::new_for_benchmarks(committee_size);
         let public_config = NodePublicConfig::new_for_tests(committee_size, num_instances).with_port_offset(100);
         let client_parameters = ClientParameters::default();
 
         let mut handles = Vec::new();
         let dir = TempDir::new("validator_sync").unwrap();
-        let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
+        let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), num_machines, num_instances);
         private_configs.iter().for_each(|private_config| {
             fs::create_dir_all(&private_config.storage_path).unwrap();
         });
@@ -294,10 +292,10 @@ mod smoke_tests {
             }
             let (linearizer_task_sender, linearizer_task_receiver) = tokio::sync::mpsc::channel(1024);
     
-            let linearizer_task = LinearizerTask::new(
-                linearizer_task_receiver,
-                global_linearizer,
-            );
+            // let linearizer_task = LinearizerTask::new(
+            //     linearizer_task_receiver,
+            //     global_linearizer,
+            // );
 
             let instance_index = i;
             let authority = i as AuthorityIndex;
@@ -310,7 +308,7 @@ mod smoke_tests {
                 private_config,
                 client_parameters.clone(),
                 linearizer_task_sender,
-                global_linearizer,
+                Arc::clone(&global_linearizer),
             )
             .await
             .unwrap();
@@ -333,13 +331,13 @@ mod smoke_tests {
     
             let linearizer_task = LinearizerTask::new(
                 linearizer_task_receiver,
-                global_linearizer,
+                Arc::clone(&global_linearizer),
             );
 
         // Boot the last validator.
         let authority = 0;
         let private_config =
-            NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size).remove(authority as usize);
+            NodePrivateConfig::new_for_benchmarks(dir.as_ref(), num_machines, num_instances).remove(authority as usize);
         let validator = Validator::start(
                 num_instances,
                 authority as AuthorityIndex,
@@ -373,6 +371,7 @@ mod smoke_tests {
     async fn validator_crash_faults() {
         let committee_size = 4;
         let num_instances = 2;
+        let num_machines = 2;
         let committee = Committee::new_for_benchmarks(committee_size);
         let public_config = NodePublicConfig::new_for_tests(committee_size, num_instances).with_port_offset(200);
         let client_parameters = ClientParameters::default();
@@ -380,7 +379,7 @@ mod smoke_tests {
         let global_linearizer = Arc::new(Mutex::new(Linearizer::new(num_instances)));
         let mut handles = Vec::new();
         let dir = TempDir::new("validator_crash_faults").unwrap();
-        let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
+        let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), num_machines, num_instances);
         private_configs.iter().for_each(|private_config| {
             fs::create_dir_all(&private_config.storage_path).unwrap();
         });
@@ -392,10 +391,10 @@ mod smoke_tests {
 
             let (linearizer_task_sender, linearizer_task_receiver) = tokio::sync::mpsc::channel(1024);
     
-            let linearizer_task = LinearizerTask::new(
-                linearizer_task_receiver,
-                global_linearizer,
-            );
+            // let linearizer_task = LinearizerTask::new(
+            //     linearizer_task_receiver,
+            //     global_linearizer,
+            // );
 
             let instance_index = i;
 
@@ -409,7 +408,7 @@ mod smoke_tests {
                 private_config,
                 client_parameters.clone(),
                 linearizer_task_sender,
-                global_linearizer,
+                Arc::clone(&global_linearizer),
             )
             .await
             .unwrap();

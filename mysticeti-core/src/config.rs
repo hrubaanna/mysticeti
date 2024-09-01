@@ -97,6 +97,9 @@ impl ImportExport for NodeParameters {}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NodeIdentifier {
+    pub authority_index: AuthorityIndex,
+    pub machine_index: usize,
+    pub instance_index: usize,
     pub public_key: PublicKey,
     pub network_address: SocketAddr,
     pub metrics_address: SocketAddr,
@@ -106,43 +109,65 @@ pub struct NodeIdentifier {
 pub struct NodePublicConfig {
     pub identifiers: Vec<NodeIdentifier>,
     pub parameters: NodeParameters,
-    pub num_instances: usize,
+    pub num_machines: usize,
+    pub instances_per_machine: usize,
 }
 
 impl NodePublicConfig {
     pub const DEFAULT_FILENAME: &'static str = "public-config.yaml";
     pub const PORT_OFFSET_FOR_TESTS: u16 = 1500;
 
-    pub fn new_for_tests(committee_size: usize, num_instances: usize) -> Self {
-        let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
-        let benchmark_port_offset = ips.len() as u16;
+    pub fn new_for_tests(num_machines: usize, instances_per_machine: usize) -> Self {
+        let committee_size = num_machines * instances_per_machine;
+        //let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
+        //let benchmark_port_offset = ips.len() as u16;
+
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let benchmark_port_offset = (num_machines*instances_per_machine) as u16;
+
+        
         let mut identifiers = Vec::new();
-        for (i, ip) in ips.into_iter().enumerate() {
-            let public_key = dummy_public_key(); // todo - fix
-            let network_port = Self::PORT_OFFSET_FOR_TESTS + i as u16;
-            let metrics_port = benchmark_port_offset + network_port;
-            let network_address = SocketAddr::new(ip, network_port);
-            let metrics_address = SocketAddr::new(ip, metrics_port);
-            identifiers.push(NodeIdentifier {
-                public_key,
-                network_address,
-                metrics_address,
-            });
+
+        for machine_index in 0..num_machines {
+            for instance_index in 0..instances_per_machine {
+                let authority_index = (machine_index * instances_per_machine + instance_index) as AuthorityIndex;
+                let public_key = dummy_public_key(); // todo - fix
+                let network_port = Self::PORT_OFFSET_FOR_TESTS + (authority_index * 2) as u16;
+                let metrics_port = benchmark_port_offset + network_port + 1;
+                let network_address = SocketAddr::new(ip, network_port);
+                let metrics_address = SocketAddr::new(ip, metrics_port);
+                identifiers.push(NodeIdentifier {
+                    authority_index,
+                    machine_index,
+                    instance_index,
+                    public_key,
+                    network_address,
+                    metrics_address,
+                });
+
+            }
         }
 
         Self {
             identifiers,
             parameters: NodeParameters::default(),
-            num_instances,
+            num_machines,
+            instances_per_machine,
         }
     }
 
-    pub fn new_for_benchmarks(ips: Vec<IpAddr>, node_parameters: Option<NodeParameters>, num_instances: usize) -> Self {
-        let default_with_ips = Self::new_for_tests(ips.len(), num_instances).with_ips(ips);
+    pub fn new_for_benchmarks(
+        ips: Vec<IpAddr>,
+        node_parameters: Option<NodeParameters>,
+        instances_per_machine: usize,
+        num_machines: usize
+    ) -> Self {
+        let default_with_ips = Self::new_for_tests(num_machines, instances_per_machine).with_ips(ips);
         Self {
             identifiers: default_with_ips.identifiers,
             parameters: node_parameters.unwrap_or_default(),
-            num_instances,
+            num_machines,
+            instances_per_machine,
         }
     }
 
@@ -170,10 +195,10 @@ impl NodePublicConfig {
     }
 
     /// Return the network addresses of corresponding validator (including our own) instances
-    pub fn relevant_network_addresses(&self, instance_index: usize) -> impl Iterator<Item = SocketAddr> + '_  {
-    self.identifiers.iter().enumerate()
-        .filter(move |(i, _)| i % self.num_instances == instance_index)
-    .map(|(i, id)| (i as AuthorityIndex, id.network_address))
+    pub fn relevant_network_addresses(&self, machine_index: usize) -> impl Iterator<Item = (AuthorityIndex, SocketAddr)> + '_  {
+        self.identifiers.iter().enumerate()
+            .filter(move |(i, _)| i % self.instances_per_machine == machine_index)
+            .map(|(i, id)| (i as AuthorityIndex, id.network_address))
     }
 
     /// Return all metric addresses (including our own) in the order of the authority index.
@@ -183,13 +208,15 @@ impl NodePublicConfig {
 
     pub fn network_address(&self, authority: AuthorityIndex) -> Option<SocketAddr> {
         self.identifiers
-            .get(authority as usize)
+            .iter()
+            .find(|id| id.authority_index == authority)
             .map(|id| id.network_address)
     }
 
     pub fn metrics_address(&self, authority: AuthorityIndex) -> Option<SocketAddr> {
         self.identifiers
-            .get(authority as usize)
+            .iter()
+            .find(|id| id.authority_index == authority)
             .map(|id| id.metrics_address)
     }
 }
@@ -198,21 +225,28 @@ impl ImportExport for NodePublicConfig {}
 
 #[derive(Serialize, Deserialize)]
 pub struct NodePrivateConfig {
-    authority: AuthorityIndex,
+    pub authority_index: AuthorityIndex,
+    pub machine_index: usize,
+    pub instance_index: usize,
     keypair: Signer,
     pub storage_path: PathBuf,
 }
 
 impl NodePrivateConfig {
-    pub fn new_for_benchmarks(working_dir: &Path, committee_size: usize) -> Vec<Self> {
-        Signer::new_for_test(committee_size)
+    pub fn new_for_benchmarks(working_dir: &Path, num_machines: usize, instances_per_machine: usize) -> Vec<Self> {
+        let total_instances = num_machines * instances_per_machine;
+        Signer::new_for_test(total_instances)
             .into_iter()
             .enumerate()
             .map(|(i, keypair)| {
-                let authority = i as AuthorityIndex;
-                let path = working_dir.join(NodePrivateConfig::default_storage_path(authority));
+                let machine_index = i / instances_per_machine;
+                let instance_index = i % instances_per_machine;
+                let authority_index = i as AuthorityIndex;
+                let path = working_dir.join(Self::default_storage_path(authority_index));
                 Self {
-                    authority,
+                    authority_index,
+                    machine_index,
+                    instance_index,
                     keypair,
                     storage_path: path,
                 }
@@ -220,12 +254,12 @@ impl NodePrivateConfig {
             .collect()
     }
 
-    pub fn default_filename(authority: AuthorityIndex) -> PathBuf {
-        format!("private-config-{authority}.yaml").into()
+    pub fn default_filename(authority_index: AuthorityIndex) -> PathBuf {
+        format!("private-config-{authority_index}.yaml").into()
     }
 
-    pub fn default_storage_path(authority: AuthorityIndex) -> PathBuf {
-        format!("storage-{authority}").into()
+    pub fn default_storage_path(authority_index: AuthorityIndex) -> PathBuf {
+        format!("storage-{authority_index}").into()
     }
 
     pub fn certified_transactions_log(&self) -> PathBuf {

@@ -25,8 +25,6 @@ pub struct NetworkSyncer<H: BlockHandler + Send + Sync + 'static, C: CommitObser
     main_task: JoinHandle<()>,
     syncer_task: oneshot::Receiver<()>,
     stop: mpsc::Receiver<()>,
-    global_linearizer: Arc<Mutex<Linearizer>>,
-    local_commit_receiver: broadcast::Receiver<NetworkMessage>,
 }
 
 pub struct NetworkSyncerInner<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 'static> {
@@ -40,7 +38,7 @@ pub struct NetworkSyncerInner<H: BlockHandler + Send + Sync + 'static, C: Commit
 }
 
 impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 'static> NetworkSyncer<H, C> {
-    pub fn start(
+    pub async fn start(
         network: Network,
         mut core: Core<H>,
         commit_period: u64,
@@ -69,7 +67,7 @@ impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 
             commit_observer,
             metrics.clone(),
         );
-        syncer.force_new_block(0);
+        syncer.force_new_block(0).await;
         let syncer = CoreThreadDispatcher::start(syncer);
         let (stop_sender, stop_receiver) = mpsc::channel(1);
         stop_sender.try_send(()).unwrap(); // occupy the only available permit, so that all other calls to send() will block
@@ -96,7 +94,7 @@ impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 
             shutdown_grace_period,
             block_fetcher,
             metrics.clone(),
-            local_commit_receiver,
+            local_commit_receiver.resubscribe(),
         ));
         let syncer_task = AsyncWalSyncer::start(wal_syncer, stop_sender, epoch_sender);
         
@@ -105,8 +103,6 @@ impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 
             main_task,
             stop: stop_receiver,
             syncer_task,
-            global_linearizer,
-            local_commit_receiver,
         }
     }
 
@@ -420,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_sync() {
-        let network_syncers = network_syncers(4).await;
+        let network_syncers = network_syncers(4, 2).await;
         println!("Started");
         tokio::time::sleep(Duration::from_secs(3)).await;
         println!("Done");

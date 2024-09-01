@@ -152,7 +152,7 @@ impl LinearizerTask {
             let (validator_id, round) = block_reference.author_round();
 
             // Handle the commit
-            self.global_linearizer.lock().await.handle_commit(round, validator_id, block_reference, block);
+            self.global_linearizer.lock().await.handle_commit(round, validator_id, block_reference, block).await;
         }
     }
 }

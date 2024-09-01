@@ -20,7 +20,7 @@ use crate::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     }, 
-    crypto::{dummy_signer, Signer}, data::Data, epoch_close::EpochManager, metrics::{Metrics, UtilizationTimerVecExt}, network::{Network, NetworkMessage, CommitTracker}, runtime::timestamp_utc, state::RecoveredState, threshold_clock::ThresholdClockAggregator, types::{AuthorityIndex, BaseStatement, BlockReference, CommitMessage, RoundNumber, StatementBlock}, wal::{WalPosition, WalSyncer, WalWriter},
+    crypto::{dummy_signer, Signer}, data::Data, epoch_close::EpochManager, metrics::{Metrics, UtilizationTimerVecExt}, network::{NetworkMessage, CommitTracker}, runtime::timestamp_utc, state::RecoveredState, threshold_clock::ThresholdClockAggregator, types::{AuthorityIndex, BaseStatement, BlockReference, CommitMessage, RoundNumber, StatementBlock}, wal::{WalPosition, WalSyncer, WalWriter},
 };
 
 use tokio::sync::{mpsc, broadcast};
@@ -340,9 +340,9 @@ impl<H: BlockHandler> Core<H> {
         self.metrics.proposed_block_vote_count.observe(votes);
     }
 
-    pub fn handle_remote_commit(&mut self, round: RoundNumber, validator: AuthorityIndex) {
+    pub async fn handle_remote_commit(&mut self, round: RoundNumber, validator: AuthorityIndex) {
         if self.commit_tracker.record_commit(round, validator) {
-            self.finalize_commit(round);
+            self.finalize_commit(round).await;
         }
     }
 
@@ -552,7 +552,7 @@ mod test {
 
     #[test]
     fn test_core_simple_exchange() {
-        let (_committee, mut cores, _) = committee_and_cores(4);
+        let (_committee, mut cores, _) = committee_and_cores(4, 2);
 
         let mut proposed_transactions = vec![];
         let mut blocks = vec![];
@@ -606,7 +606,7 @@ mod test {
     fn test_randomized_simple_exchange() {
         'l: for seed in 0..100 {
             let mut rng = StdRng::from_seed([seed; 32]);
-            let (committee, mut cores, _) = committee_and_cores(4);
+            let (committee, mut cores, _) = committee_and_cores(4, 2);
 
             let mut proposed_transactions = vec![];
             let mut pending: Vec<_> = committee.authorities().map(|_| vec![]).collect();
@@ -689,7 +689,7 @@ mod test {
     #[test]
     fn test_core_recovery() {
         let tmp = tempdir::TempDir::new("test_core_recovery").unwrap();
-        let (_committee, mut cores, _) = committee_and_cores_persisted(4, Some(tmp.path()));
+        let (_committee, mut cores, _) = committee_and_cores_persisted(4, Some(tmp.path()), 2);
 
         let mut proposed_transactions = vec![];
         let mut blocks = vec![];
@@ -707,7 +707,7 @@ mod test {
         cores.iter_mut().for_each(Core::write_state);
         drop(cores);
 
-        let (_committee, mut cores, _) = committee_and_cores_persisted(4, Some(tmp.path()));
+        let (_committee, mut cores, _) = committee_and_cores_persisted(4, Some(tmp.path()), 2);
 
         let more_blocks = blocks.split_off(2);
 
@@ -732,7 +732,7 @@ mod test {
 
         eprintln!("===");
 
-        let (_committee, mut cores, _) = committee_and_cores_persisted(4, Some(tmp.path()));
+        let (_committee, mut cores, _) = committee_and_cores_persisted(4, Some(tmp.path()), 2);
 
         for core in &mut cores {
             core.add_blocks(blocks_r2.clone());
