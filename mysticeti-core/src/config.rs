@@ -190,15 +190,31 @@ impl NodePublicConfig {
     }
 
     /// Return all network addresses (including our own) in the order of the authority index.
-    pub fn all_network_addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
-        self.identifiers.iter().map(|id| id.network_address)
+    pub fn all_network_addresses(&self) -> impl Iterator<Item = (AuthorityIndex, SocketAddr)> + '_ {
+        self.identifiers.iter().map(|id| (id.authority_index, id.network_address))
+
     }
 
     /// Return the network addresses of corresponding validator (including our own) instances
-    pub fn relevant_network_addresses(&self, machine_index: usize) -> impl Iterator<Item = (AuthorityIndex, SocketAddr)> + '_  {
-        self.identifiers.iter().enumerate()
-            .filter(move |(i, _)| i % self.instances_per_machine == machine_index)
-            .map(|(i, id)| (i as AuthorityIndex, id.network_address))
+    pub fn relevant_network_addresses(&self, authority_index: AuthorityIndex) -> impl Iterator<Item = (AuthorityIndex, SocketAddr)> + '_  {
+        let mut relevant_addresses = Vec::new();
+        let machine_index = authority_index / self.instances_per_machine as u64;
+        let position_on_machine = authority_index % self.instances_per_machine as u64;
+
+        // Get corresponding validators on other machines
+        let mut corresponding_validators = Vec::new();
+        for i in 0..self.num_machines {
+            let corresponding_validator = (i * self.instances_per_machine + position_on_machine as usize) as u64;
+            corresponding_validators.push(corresponding_validator);
+        }
+
+        // Return all addresses in the corresponding validators except our own 
+        for i in 0..self.identifiers.len() {
+            if corresponding_validators.contains(&(i as u64)) && i != authority_index as usize {
+                relevant_addresses.push((i as AuthorityIndex, self.identifiers[i].network_address));
+            }
+        }
+        relevant_addresses.into_iter()
     }
 
     /// Return all metric addresses (including our own) in the order of the authority index.
