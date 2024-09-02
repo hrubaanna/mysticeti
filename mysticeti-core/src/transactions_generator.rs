@@ -45,6 +45,7 @@ impl TransactionGenerator {
 
     pub async fn run(mut self) {
         let load = self.client_parameters.load;
+        tracing::info!("Load: {}", load);
         let transactions_per_block_interval = (load + 9) / 10;
         let max_block_size = 4 * 1024 * 1024;
         let target_block_size = min(max_block_size, transactions_per_block_interval);
@@ -75,6 +76,7 @@ impl TransactionGenerator {
 
                 if block_size >= max_block_size {
                     if self.sender.send(block.clone()).await.is_err() {
+                        tracing::error!("Failed to send block");
                         return;
                     }
                     block.clear();
@@ -82,8 +84,11 @@ impl TransactionGenerator {
                 }
             }
 
-            if !block.is_empty() && self.sender.send(block).await.is_err() {
-                return;
+            if !block.is_empty() {
+                if self.sender.send(block).await.is_err() {
+                    tracing::error!("Failed to send block");
+                    return;
+                }
             }
         }
     }

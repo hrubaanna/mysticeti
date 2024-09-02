@@ -104,15 +104,15 @@ impl Network {
 
     pub async fn load(
         parameters: &NodePublicConfig,
-        our_id: AuthorityIndex,
+        authority_index: AuthorityIndex,
         local_addr: SocketAddr,
         metrics: Arc<Metrics>,
-        instance_index: usize,
     ) -> Self {
-        let addresses = parameters.relevant_network_addresses(instance_index).collect::<Vec<_>>();
-    let addresses: Vec<SocketAddr> = addresses.iter().map(|(_, addr)| *addr).collect();
-    print_network_address_table(&addresses);
-    Self::from_socket_addresses(&addresses, our_id as usize, local_addr, metrics).await
+        let addresses = parameters.relevant_network_addresses(authority_index).collect::<Vec<_>>();
+        let print_addresses: Vec<SocketAddr> = addresses.iter().map(|(_, addr)| *addr).collect();
+
+        print_network_address_table(&print_addresses, authority_index);
+        Self::from_socket_addresses(&addresses, authority_index, local_addr, metrics).await
     }
 
     pub fn connection_receiver(&mut self) -> &mut mpsc::Receiver<Connection> {
@@ -120,17 +120,17 @@ impl Network {
     }
 
     pub async fn from_socket_addresses(
-        addresses: &[SocketAddr],
-        our_id: usize,
+        addresses: &[(AuthorityIndex, SocketAddr)],
+        authority_index: AuthorityIndex,
         local_addr: SocketAddr,
         metrics: Arc<Metrics>,
     ) -> Self {
-        if our_id >= addresses.len() {
-            panic!(
-                "our_id {our_id} is larger then address length {}",
-                addresses.len()
-            );
-        }
+        // if authority_index >= addresses.len() {
+        //     panic!(
+        //         "authority_index {authority_index} is larger then address length {}",
+        //         addresses.len()
+        //     );
+        // }
         let server = TcpListener::bind(local_addr)
             .await
             .expect("Failed to bind to local socket");
@@ -138,8 +138,9 @@ impl Network {
             HashMap::default();
         let handle = Handle::current();
         let (connection_sender, connection_receiver) = mpsc::channel(16);
-        for (id, address) in addresses.iter().enumerate() {
-            if id == our_id {
+
+        for (id, address) in addresses.iter() {
+            if *id == authority_index {
                 continue;
             }
             let (sender, receiver) = mpsc::unbounded_channel();
@@ -151,15 +152,16 @@ impl Network {
             handle.spawn(
                 Worker {
                     peer: *address,
-                    peer_id: id,
+                    peer_id: *id as usize,
                     connection_sender: connection_sender.clone(),
                     bind_addr: bind_addr(local_addr),
-                    active_immediately: id < our_id,
-                    latency_sender: metrics.connection_latency_sender.get(id).expect("Can not locate connection_latency_sender metric - did you initialize metrics with correct committee?").clone()
+                    active_immediately: *id < authority_index,
+                    latency_sender: metrics.connection_latency_sender.get(*id as usize).expect("Can not locate connection_latency_sender metric - did you initialize metrics with correct committee?").clone()
                 }
                 .run(receiver),
             );
         }
+
         handle.spawn(
             Server {
                 server,

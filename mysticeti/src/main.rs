@@ -276,7 +276,7 @@ async fn run(
     //client_parameters_path: String,
     num_instances: usize,
 ) -> Result<()> {
-    tracing::info!("Starting {num_instances} validator(s) with authority {machine_index}");
+    tracing::info!("Starting {num_instances} validator(s) on machine {machine_index}");
 
     // Create global linarizer
     let global_linearizer = Arc::new(Mutex::new(Linearizer::new(num_instances)));
@@ -342,19 +342,19 @@ async fn spawn_validator_instances(
     let mut handles = Vec::new();
 
     for i in 0..num_instances {
+        
         let authority_index = machine_index * num_instances as u64 + i as AuthorityIndex;
+
         let committee_instance = Arc::clone(&committee);
         let public_config_instance = public_config.clone();
-        let unique_private_config_path = private_config_path[authority_index as usize].clone();
+        let unique_private_config_path = private_config_path[i].clone();
         let private_config_instance = load_private_config(&unique_private_config_path, i)?;
         let client_parameters_instance = client_parameters.clone();
         let global_linearizer = Arc::clone(&global_linearizer);
-        let instance_index = i;
 
         let handle = spawn_validator(
             num_instances,
             authority_index,
-            instance_index,
             committee_instance,
             public_config_instance,
             private_config_instance,
@@ -382,7 +382,6 @@ fn load_private_config(unique_private_config_path: &str, instance: usize) -> Res
 fn spawn_validator(
     num_instances: usize,
     authority_index: AuthorityIndex,
-    instance_index: usize,
     committee_instance: Arc<Committee>,
     public_config_instance: NodePublicConfig,
     private_config_instance: NodePrivateConfig,
@@ -398,7 +397,6 @@ fn spawn_validator(
         let validator = Validator::start(
             num_instances,
             authority_index, 
-            instance_index,
             committee_instance, 
             &public_config_instance, 
             private_config_instance,

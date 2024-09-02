@@ -11,7 +11,7 @@ use std::{
 
 use minibytes::Bytes;
 use tokio::sync::{mpsc, Mutex};
-use tokio::runtime::Handle;
+use async_trait::async_trait;
 
 use crate::{
     block_store::BlockStore,
@@ -34,20 +34,21 @@ use crate::{
     },
 };
 
+#[async_trait]
 pub trait BlockHandler: Send + Sync {
-    fn handle_blocks(
+    async fn handle_blocks(
         &mut self,
         blocks: &[Data<StatementBlock>],
         require_response: bool,
     ) -> Vec<BaseStatement>;
 
-    fn handle_proposal(&mut self, block: &Data<StatementBlock>);
+    async fn handle_proposal(&mut self, block: &Data<StatementBlock>);
 
     fn state(&self) -> Bytes;
 
     fn recover_state(&mut self, _state: &Bytes);
 
-    fn cleanup(&self) {}
+    async fn cleanup(&self) {}
 }
 
 const REAL_BLOCK_HANDLER_TXN_SIZE: usize = 512;
@@ -107,6 +108,8 @@ impl RealBlockHandler {
 
 impl RealBlockHandler {
     fn receive_with_limit(&mut self) -> Option<Vec<Transaction>> {
+        let pending = self.pending_transactions;
+        tracing::info!("Receiving tx, currently {pending}");
         if self.pending_transactions >= SOFT_MAX_PROPOSED_PER_BLOCK {
             return None;
         }
@@ -147,12 +150,14 @@ impl RealBlockHandler {
     }
 }
 
+#[async_trait]
 impl BlockHandler for RealBlockHandler {
-    fn handle_blocks(
+    async fn handle_blocks(
         &mut self,
         blocks: &[Data<StatementBlock>],
         require_response: bool,
     ) -> Vec<BaseStatement> {
+        tracing::info!("Handling blocks");
         let current_timestamp = runtime::timestamp_utc();
         let _timer = self
             .metrics
@@ -161,13 +166,15 @@ impl BlockHandler for RealBlockHandler {
         let mut response = vec![];
         if require_response {
             while let Some(data) = self.receive_with_limit() {
+                let tx_count = data.len();
+                tracing::info!("Received {tx_count} transactions");
                 for tx in data {
                     response.push(BaseStatement::Share(tx));
                 }
             }
         }
         // Use try_lock instead of block_on
-    if let Ok(transaction_time) = self.transaction_time.try_lock() {
+        let transaction_time = self.transaction_time.lock().await;
         for block in blocks {
             let response_option: Option<&mut Vec<BaseStatement>> = if require_response {
                 Some(&mut response)
@@ -188,11 +195,6 @@ impl BlockHandler for RealBlockHandler {
                 }
             }
         }
-    } else {
-        // Handle the case where the lock couldn't be acquired
-        tracing::warn!("Failed to acquire lock on transaction_time in handle_blocks");
-        // Optionally, you might want to handle this case differently
-    }
     
     self.metrics
         .block_handler_pending_certificates
@@ -200,10 +202,10 @@ impl BlockHandler for RealBlockHandler {
     response
     }
 
-    fn handle_proposal(&mut self, block: &Data<StatementBlock>) {
+    async fn handle_proposal(&mut self, block: &Data<StatementBlock>) {
         // todo - this is not super efficient
         self.pending_transactions -= block.shared_transactions().count();
-        let mut transaction_time = Handle::current().block_on(self.transaction_time.lock());
+        let mut transaction_time = self.transaction_time.lock().await;
         for (locator, _) in block.shared_transactions() {
             transaction_time.insert(locator, TimeInstant::now());
         }
@@ -223,10 +225,9 @@ impl BlockHandler for RealBlockHandler {
         self.transaction_votes.with_state(state);
     }
 
-    fn cleanup(&self) {
+    async fn cleanup(&self) {
         let _timer = self.metrics.block_handler_cleanup_util.utilization_timer();
-        // todo - all of this should go away and we should measure tx latency differently
-        let mut l = Handle::current().block_on(self.transaction_time.lock());
+        let mut l = self.transaction_time.lock().await;
         l.retain(|_k, v| v.elapsed() < Duration::from_secs(10));
     }
 }
@@ -270,15 +271,18 @@ impl TestBlockHandler {
     }
 }
 
+#[async_trait]
 impl BlockHandler for TestBlockHandler {
-    fn handle_blocks(
+    async fn handle_blocks(
         &mut self,
         blocks: &[Data<StatementBlock>],
         require_response: bool,
     ) -> Vec<BaseStatement> {
+        tracing::info!("Handling {} blocks, require_response: {}", blocks.len(), require_response);
         // todo - this is ugly, but right now we need a way to recover self.last_transaction
         let mut response = vec![];
         if require_response {
+            tracing::info!("Attempting to receive transactions");
             for block in blocks {
                 if block.author() == self.authority {
                     // We can see our own block in handle_blocks - this can happen during core recovery
@@ -294,7 +298,7 @@ impl BlockHandler for TestBlockHandler {
             let next_transaction = Self::make_transaction(self.last_transaction);
             response.push(BaseStatement::Share(next_transaction));
         }
-        let transaction_time = Handle::current().block_on(self.transaction_time.lock());
+        let transaction_time = self.transaction_time.lock().await;
         for block in blocks {
             tracing::debug!("Processing {block:?}");
             let response_option: Option<&mut Vec<BaseStatement>> = if require_response {
@@ -316,8 +320,8 @@ impl BlockHandler for TestBlockHandler {
         response
     }
 
-    fn handle_proposal(&mut self, block: &Data<StatementBlock>) {
-        let mut transaction_time = Handle::current().block_on(self.transaction_time.lock());
+    async fn handle_proposal(&mut self, block: &Data<StatementBlock>) {
+        let mut transaction_time = self.transaction_time.lock().await;
         for (locator, _) in block.shared_transactions() {
             transaction_time.insert(locator, TimeInstant::now());
             self.proposed.push(locator);
@@ -433,15 +437,16 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
     }
 }
 
+#[async_trait]
 impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObserver
     for TestCommitHandler<H>
 {
-    fn observe_commit(
+    async fn observe_commit(
         &mut self,
         committed_subdags: Vec<CommittedSubDag>,
     ) -> Vec<CommittedSubDag> {
         let current_timestamp = runtime::timestamp_utc();
-        let transaction_time = Handle::current().block_on(self.transaction_time.lock());
+        let transaction_time = self.transaction_time.lock().await;
 
         for commit in &committed_subdags {
             self.committed_leaders.push(commit.anchor);
@@ -479,19 +484,14 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
         self.transaction_votes.state()
     }
 
-    fn recover_committed(&mut self, committed: HashSet<BlockReference>, state: Option<Bytes>) {
-        if let Ok(mut linearizer) = self.global_linearizer.try_lock() {
-            assert!(linearizer.committed.is_empty());
-            if let Some(state) = state {
-                self.transaction_votes.with_state(&state);
-            } else {
-                assert!(committed.is_empty());
-            }
-            linearizer.committed = committed;
+    async fn recover_committed(&mut self, committed: HashSet<BlockReference>, state: Option<Bytes>) {
+        let mut linearizer = self.global_linearizer.lock().await;
+        assert!(linearizer.committed.is_empty());
+        if let Some(state) = state {
+            self.transaction_votes.with_state(&state);
         } else {
-            // Handle the case where the lock couldn't be acquired
-            tracing::warn!("Failed to acquire lock on global_linearizer in recover_committed");
-            // Optionally, you might want to retry or handle this case differently
+            assert!(committed.is_empty());
         }
+        linearizer.committed = committed;
     }
 }

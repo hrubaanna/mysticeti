@@ -118,7 +118,6 @@ impl NodePublicConfig {
     pub const PORT_OFFSET_FOR_TESTS: u16 = 1500;
 
     pub fn new_for_tests(num_machines: usize, instances_per_machine: usize) -> Self {
-        let committee_size = num_machines * instances_per_machine;
         //let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
         //let benchmark_port_offset = ips.len() as u16;
 
@@ -198,7 +197,6 @@ impl NodePublicConfig {
     /// Return the network addresses of corresponding validator (including our own) instances
     pub fn relevant_network_addresses(&self, authority_index: AuthorityIndex) -> impl Iterator<Item = (AuthorityIndex, SocketAddr)> + '_  {
         let mut relevant_addresses = Vec::new();
-        let machine_index = authority_index / self.instances_per_machine as u64;
         let position_on_machine = authority_index % self.instances_per_machine as u64;
 
         // Get corresponding validators on other machines
@@ -210,7 +208,8 @@ impl NodePublicConfig {
 
         // Return all addresses in the corresponding validators except our own 
         for i in 0..self.identifiers.len() {
-            if corresponding_validators.contains(&(i as u64)) && i != authority_index as usize {
+            //if corresponding_validators.contains(&(i as u64)) && i != authority_index as usize {
+            if corresponding_validators.contains(&(i as u64)) {
                 relevant_addresses.push((i as AuthorityIndex, self.identifiers[i].network_address));
             }
         }

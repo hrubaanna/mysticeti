@@ -23,7 +23,7 @@ use crate::{
     settings::Settings,
 };
 
-const DEFAULT_NODE_CONFIG_PATH: &str = "orchestrator/assets/node-config.json";
+const _DEFAULT_NODE_CONFIG_PATH: &str = "orchestrator/assets/node-config.json";
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct MysticetiNodeParameters(NodeParameters);
@@ -193,8 +193,8 @@ impl ProtocolCommands<MysticetiNodeParameters, MysticetiClientParameters> for My
 
     fn node_command<I>(
         &self,
-        instances: I,
-        parameters: &BenchmarkParameters,
+        _instances: I,
+        _parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
         I: IntoIterator<Item = Instance>,

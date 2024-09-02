@@ -14,6 +14,7 @@ use minibytes::Bytes;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use async_trait::async_trait;
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
@@ -30,15 +31,16 @@ pub trait SyncerSignals: Send + Sync {
     fn new_block_ready(&mut self);
 }
 
+#[async_trait]
 pub trait CommitObserver: Send + Sync {
-    fn observe_commit(
+    async fn observe_commit(
         &mut self,
         committed_subdags: Vec<CommittedSubDag>,
     ) -> Vec<CommittedSubDag>;
 
     fn aggregator_state(&self) -> Bytes;
 
-    fn recover_committed(&mut self, committed: HashSet<BlockReference>, state: Option<Bytes>);
+    async fn recover_committed(&mut self, committed: HashSet<BlockReference>, state: Option<Bytes>);
 }
 
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
@@ -72,7 +74,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .metrics
             .utilization_timer
             .utilization_timer("Syncer::add_blocks");
-        self.core.add_blocks(blocks);
+        self.core.add_blocks(blocks).await;
         self.try_new_block().await;
     }
 
@@ -97,7 +99,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                 .core
                 .ready_new_block(self.commit_period, &self.connected_authorities)
         {
-            if self.core.try_new_block().is_none() {
+            if self.core.try_new_block().await.is_none() {
                 return;
             }
             self.signals.new_block_ready();
@@ -133,7 +135,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                     committed_subdags.extend(subdag);
                 }
 
-                let observed_subdags = self.commit_observer.observe_commit(committed_subdags);
+                let observed_subdags = self.commit_observer.observe_commit(committed_subdags).await;
 
                 for subdag in observed_subdags {
                     self.core.handle_committed_subdag(

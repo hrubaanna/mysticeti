@@ -54,7 +54,7 @@ impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 
         let notify = Arc::new(Notify::new());
         // todo - ugly, probably need to merge syncer and core
         let (committed, state) = core.take_recovered_committed_blocks();
-        commit_observer.recover_committed(committed, state);
+        let _ = commit_observer.recover_committed(committed, state);
         let committee = core.committee().clone();
         let wal_syncer = core.wal_syncer();
         let block_store = core.block_store().clone();
@@ -347,7 +347,7 @@ pub struct AsyncWalSyncer {
     stop: mpsc::Sender<()>,
     epoch_signal: mpsc::Sender<()>,
     _sender: oneshot::Sender<()>,
-    runtime: tokio::runtime::Handle,
+    _runtime: tokio::runtime::Handle,
 }
 
 impl AsyncWalSyncer {
@@ -363,7 +363,7 @@ impl AsyncWalSyncer {
             stop,
             epoch_signal,
             _sender: sender,
-            runtime: tokio::runtime::Handle::current(),
+            _runtime: tokio::runtime::Handle::current(),
         };
         std::thread::Builder::new()
             .name("wal-syncer".to_string())
@@ -381,10 +381,9 @@ impl AsyncWalSyncer {
         oneshot::channel().1
     }
 
-    pub fn run(mut self) {
-        let runtime = self.runtime.clone();
+    pub async fn run(mut self) {
         loop {
-            if runtime.block_on(self.wait_next()) {
+            if self.wait_next().await {
                 return;
             }
             self.wal_syncer.sync().expect("Failed to sync wal");

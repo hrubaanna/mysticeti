@@ -6,7 +6,6 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 
 use ::prometheus::Registry;
@@ -41,8 +40,6 @@ impl Validator {
         num_instances: usize,
         // Authority is the unique index of the validator
         authority: AuthorityIndex,
-        // Instance index is the index of the logical validator 
-        instance_index: usize,
         committee: Arc<Committee>,
         public_config: &NodePublicConfig,
         private_config: NodePrivateConfig,
@@ -110,7 +107,6 @@ impl Validator {
             authority,
             binding_network_address,
             metrics.clone(),
-            instance_index,
         )
         .await;
         
@@ -129,7 +125,7 @@ impl Validator {
             CoreOptions::default(),
             linearizer_sender,
             local_commit_sender,
-        );
+        ).await;
         
         let network_synchronizer = NetworkSyncer::start(
             network,
@@ -141,10 +137,6 @@ impl Validator {
             global_linearizer,
             local_commit_receiver,
         );
-
-        tracing::info!("Validator {authority} listening on {network_address}");
-        tracing::info!("Validator {authority} exposing metrics on {metrics_address}");
-        
 
         Ok(Self {
             network_synchronizer: network_synchronizer.await,
@@ -236,11 +228,9 @@ mod smoke_tests {
             // );
 
             let authority = i as AuthorityIndex;
-            let instance_index = i;
             let validator = Validator::start(
                 num_instances,
                 authority,
-                instance_index,
                 committee.clone(),
                 &public_config,
                 private_config,
@@ -297,12 +287,10 @@ mod smoke_tests {
             //     global_linearizer,
             // );
 
-            let instance_index = i;
             let authority = i as AuthorityIndex;
             let validator = Validator::start(
                 num_instances,
                 authority,
-                instance_index,
                 committee.clone(),
                 &public_config,
                 private_config,
@@ -341,7 +329,6 @@ mod smoke_tests {
         let validator = Validator::start(
                 num_instances,
                 authority as AuthorityIndex,
-                0,
                 committee.clone(),
                 &public_config,
                 private_config,
@@ -396,13 +383,10 @@ mod smoke_tests {
             //     global_linearizer,
             // );
 
-            let instance_index = i;
-
             let authority = i as AuthorityIndex;
             let validator = Validator::start(
                 num_instances,
                 authority,
-                instance_index,
                 committee.clone(),
                 &public_config,
                 private_config,

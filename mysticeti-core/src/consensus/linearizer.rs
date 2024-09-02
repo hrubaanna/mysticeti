@@ -55,7 +55,7 @@ impl Linearizer {
 
     /// Collect the sub-dag from a specific anchor excluding any duplicates or blocks that
     /// have already been committed (within previous sub-dags).
-    fn collect_sub_dag(
+    fn _collect_sub_dag(
         &mut self,
         block_store: &BlockStore,
         leader_block: Data<StatementBlock>,
