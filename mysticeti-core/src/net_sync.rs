@@ -11,10 +11,11 @@ use futures::future::join_all;
 use tokio::{
     select,
     sync::{mpsc, broadcast, oneshot, Notify, Mutex},
+    task::JoinHandle,
 };
 
 use crate::{
-    block_handler::BlockHandler, block_store::BlockStore, committee::Committee, consensus::linearizer::Linearizer, core::Core, core_thread::CoreThreadDispatcher, metrics::Metrics, network::{Connection, Network, NetworkMessage}, runtime::{self, timestamp_utc, Handle, JoinError, JoinHandle}, syncer::{CommitObserver, Syncer, SyncerSignals}, synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters}, types::{format_authority_index, AuthorityIndex}, wal::WalSyncer
+    block_handler::BlockHandler, block_store::BlockStore, committee::Committee, consensus::linearizer::Linearizer, core::Core, core_thread::CoreThreadDispatcher, metrics::Metrics, network::{Connection, Network, NetworkMessage}, runtime::{self, timestamp_utc, Handle, JoinError}, syncer::{CommitObserver, Syncer, SyncerSignals}, synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters}, types::{format_authority_index, AuthorityIndex}, wal::WalSyncer
 };
 
 /// The maximum number of blocks that can be requested in a single message.
@@ -49,6 +50,7 @@ impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 
         local_commit_receiver: broadcast::Receiver<NetworkMessage>,
 
     ) -> Self {
+
         let authority_index = core.authority();
         let handle = Handle::current();
         let notify = Arc::new(Notify::new());
@@ -68,7 +70,8 @@ impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 
             metrics.clone(),
         );
         syncer.force_new_block(0).await;
-        let syncer = CoreThreadDispatcher::start(syncer);
+
+        let syncer = CoreThreadDispatcher::start(syncer).await;
         let (stop_sender, stop_receiver) = mpsc::channel(1);
         stop_sender.try_send(()).unwrap(); // occupy the only available permit, so that all other calls to send() will block
         let (epoch_sender, epoch_receiver) = mpsc::channel(1);
@@ -114,7 +117,7 @@ impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 
         let Ok(inner) = Arc::try_unwrap(self.inner) else {
             panic!("Shutdown failed - not all resources are freed after main task is completed");
         };
-        inner.syncer.stop()
+        inner.syncer.stop().await.expect("Failed to stop syncer")
     }
 
     async fn run(
@@ -247,6 +250,7 @@ impl<H: BlockHandler + Send + Sync + 'static, C: CommitObserver + Send + Sync + 
         mut epoch_close_signal: mpsc::Receiver<()>,
         shutdown_grace_period: Duration,
     ) -> Option<()> {
+
         let leader_timeout = Duration::from_secs(1);
         loop {
             let notified = inner.notify.notified();

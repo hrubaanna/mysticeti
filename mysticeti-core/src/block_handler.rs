@@ -11,6 +11,7 @@ use std::{
 
 use minibytes::Bytes;
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::timeout;
 use async_trait::async_trait;
 
 use crate::{
@@ -107,13 +108,13 @@ impl RealBlockHandler {
 }
 
 impl RealBlockHandler {
-    fn receive_with_limit(&mut self) -> Option<Vec<Transaction>> {
+    async fn receive_with_limit(&mut self) -> Option<Vec<Transaction>> {
         let pending = self.pending_transactions;
         tracing::info!("Receiving tx, currently {pending}");
         if self.pending_transactions >= SOFT_MAX_PROPOSED_PER_BLOCK {
             return None;
         }
-        let received = self.receiver.try_recv().ok()?;
+        let received = self.receiver.recv().await?;
         self.pending_transactions += received.len();
         Some(received)
     }
@@ -157,7 +158,6 @@ impl BlockHandler for RealBlockHandler {
         blocks: &[Data<StatementBlock>],
         require_response: bool,
     ) -> Vec<BaseStatement> {
-        tracing::info!("Handling blocks");
         let current_timestamp = runtime::timestamp_utc();
         let _timer = self
             .metrics
@@ -165,9 +165,9 @@ impl BlockHandler for RealBlockHandler {
             .utilization_timer("BlockHandler::handle_blocks");
         let mut response = vec![];
         if require_response {
-            while let Some(data) = self.receive_with_limit() {
+            while let Some(data) = self.receive_with_limit().await {
+                tracing::info!("Received {} transactions", data.len());
                 let tx_count = data.len();
-                tracing::info!("Received {tx_count} transactions");
                 for tx in data {
                     response.push(BaseStatement::Share(tx));
                 }
@@ -278,11 +278,9 @@ impl BlockHandler for TestBlockHandler {
         blocks: &[Data<StatementBlock>],
         require_response: bool,
     ) -> Vec<BaseStatement> {
-        tracing::info!("Handling {} blocks, require_response: {}", blocks.len(), require_response);
         // todo - this is ugly, but right now we need a way to recover self.last_transaction
         let mut response = vec![];
         if require_response {
-            tracing::info!("Attempting to receive transactions");
             for block in blocks {
                 if block.author() == self.authority {
                     // We can see our own block in handle_blocks - this can happen during core recovery

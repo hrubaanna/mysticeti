@@ -7,6 +7,7 @@ use std::{
 };
 
 use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 
 use ::prometheus::Registry;
 use eyre::{eyre, Context, Result};
@@ -22,7 +23,7 @@ use crate::{
     net_sync::NetworkSyncer,
     network::{Network, NetworkMessage},
     prometheus,
-    runtime::{JoinError, JoinHandle},
+    runtime::JoinError,
     transactions_generator::TransactionGenerator,
     types::{AuthorityIndex, BlockReference, StatementBlock},
     wal::{self, walf},

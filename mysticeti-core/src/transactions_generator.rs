@@ -5,6 +5,7 @@ use std::{cmp::min, time::Duration};
 
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use tokio::sync::mpsc;
+use tokio::task;
 
 use crate::{
     config::ClientParameters,
@@ -33,19 +34,20 @@ impl TransactionGenerator {
             client_parameters.load,
             client_parameters.initial_delay
         );
-        runtime::Handle::current().spawn(
-            Self {
-                sender,
-                rng: StdRng::seed_from_u64(seed),
-                client_parameters,
-            }
-            .run(),
-        );
+
+        let generator = Self {
+            sender,
+            rng: StdRng::seed_from_u64(seed),
+            client_parameters,
+        };
+
+        task::spawn(async move {
+            generator.run().await;
+        });
     }
 
     pub async fn run(mut self) {
         let load = self.client_parameters.load;
-        tracing::info!("Load: {}", load);
         let transactions_per_block_interval = (load + 9) / 10;
         let max_block_size = 4 * 1024 * 1024;
         let target_block_size = min(max_block_size, transactions_per_block_interval);

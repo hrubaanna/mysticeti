@@ -6,13 +6,14 @@ use std::{collections::HashMap, env, sync::Arc, time::Duration};
 use futures::future::join_all;
 use rand::{seq::SliceRandom, thread_rng};
 use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
 
 use crate::{
     block_handler::BlockHandler,
     metrics::Metrics,
     net_sync::{self, NetworkSyncerInner},
     network::NetworkMessage,
-    runtime::{sleep, timestamp_utc, Handle, JoinHandle},
+    runtime::{sleep, timestamp_utc, Handle},
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
