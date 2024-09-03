@@ -7,13 +7,13 @@ use crate::types::{RoundNumber, StatementBlock};
 use crate::{block_handler::BlockHandler, types::AuthorityIndex};
 use crate::{data::Data, types::BlockReference};
 use std::sync::Arc;
-use std::{collections::HashSet, thread};
+use std::collections::HashSet;
 use tokio::sync::{mpsc, oneshot};
-use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 
 pub struct CoreThreadDispatcher<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     sender: mpsc::Sender<CoreThreadCommand>,
-    join_handle: thread::JoinHandle<Syncer<H, S, C>>,
+    join_handle: JoinHandle<Syncer<H, S, C>>,
     metrics: Arc<Metrics>,
 }
 
@@ -39,19 +39,13 @@ enum CoreThreadCommand {
 impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 'static>
     CoreThreadDispatcher<H, S, C>
 {
-    pub fn start(syncer: Syncer<H, S, C>) -> Self {
+    pub async fn start(syncer: Syncer<H, S, C>) -> Self {
         let (sender, receiver) = mpsc::channel(32);
         let metrics = syncer.core().metrics.clone();
         let core_thread = CoreThread { syncer, receiver };
-        let runtime = Runtime::new().unwrap();
-        let join_handle = thread::Builder::new()
-            .name("mysticeti-core".to_string())
-            .spawn(move || {
-                runtime.block_on(async { 
-                    core_thread.run().await
-                })
-            })
-            .unwrap();
+        let join_handle = tokio::spawn(async move {
+            core_thread.run().await
+        });
 
         Self {
             sender,
@@ -60,9 +54,9 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         }
     }
 
-    pub fn stop(self) -> Syncer<H, S, C> {
+    pub async fn stop(self) -> Result<Syncer<H, S, C>, tokio::task::JoinError> {
         drop(self.sender);
-        self.join_handle.join().unwrap()
+        self.join_handle.await
     }
 
     pub async fn add_blocks(&self, blocks: Vec<Data<StatementBlock>>) {
